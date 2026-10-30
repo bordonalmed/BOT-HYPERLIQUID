@@ -65,12 +65,13 @@ def coletar(base, cfg=bot.CFG, agora=None):
     posicoes = []
     for p in estado.get("posicoes", []):
         mid = p.get("ultimo_mid") or p["entrada"]
-        saida = bot.preco_execucao(mid, p["lado"], "saida", cfg["slippage_por_lado"])
+        saida = bot.preco_execucao(mid, p["lado"], "saida", p.get("slip", cfg["slippage_por_lado"]))
         pnl, _ = bot.pnl_liquido(p["lado"], p["entrada"], saida, p["tamanho"], cfg["taxa_por_lado"])
         posicoes.append({
             "moeda": p["moeda"], "lado": p["lado"], "entrada": p["entrada"], "atual": mid,
             "stop": p["stop"], "alvo": p["alvo"], "tamanho": p["tamanho"],
             "nocional": p["tamanho"] * p["entrada"], "pnl": pnl,
+            "movel": bool(p.get("trailing")),
             "minutos": (agora_ms - p["entrada_ms"]) / 60000.0,
         })
     equity = capital + sum(p["pnl"] for p in posicoes)
@@ -142,7 +143,10 @@ def coletar(base, cfg=bot.CFG, agora=None):
         },
         "max_posicoes": cfg["max_posicoes"],
         "tempo_max_min": cfg["tempo_max_min"],
-        "estrategia": "%s TREND" % cfg["intervalo"].upper(),
+        "estrategia": "%s · %s" % (cfg.get("estrategia", "tendencia").upper(), cfg["intervalo"].upper()),
+        "alavancagem_max": cfg["alavancagem_max"],
+        "radar": estado.get("radar", [])[:15],
+        "radar_ms": estado.get("radar_ms"),
         "posicoes": posicoes,
         "universo": estado.get("universo", []),
         "curva": curva,
@@ -289,6 +293,8 @@ footer{margin-top:18px;color:var(--dim);font-size:11px;text-align:center;letter-
     <div class="panel"><h2>Risco do dia</h2><div id="dia"></div></div>
   </section>
 
+  <div class="panel m" style="margin-bottom:14px"><h2>Radar de assimetria</h2><div id="radar"></div></div>
+
   <section class="grid main2" style="margin-bottom:14px">
     <div class="panel"><h2>Ultimas operacoes</h2><div id="trades"></div></div>
     <div class="grid" style="align-content:start">
@@ -361,7 +367,7 @@ function posicoes(d){
   if(!d.posicoes.length) return `<div class="empty">NENHUMA POSICAO ABERTA · 0/${d.max_posicoes}</div>`;
   return '<div class="tbl"><table><tr><th>Moeda</th><th>Lado</th><th>Entrada</th><th>Atual</th><th>Stop</th><th>Alvo</th><th>Nocional</th><th>PnL</th><th>Tempo</th></tr>'+
   d.posicoes.map(p=>`<tr><td><b>${esc(p.moeda)}</b></td><td><span class="tag ${p.lado}">${p.lado.toUpperCase()}</span></td>
-   <td>${px(p.entrada)}</td><td>${px(p.atual)}</td><td class="neg">${px(p.stop)}</td><td class="pos">${px(p.alvo)}</td>
+   <td>${px(p.entrada)}</td><td>${px(p.atual)}</td><td class="neg">${px(p.stop)}${p.movel?' <span class="meta">movel</span>':''}</td><td class="pos">${p.alvo==null?'livre':px(p.alvo)}</td>
    <td>${usd(p.nocional)}</td><td class="${cls(p.pnl)}">${usd(p.pnl,1)}</td><td>${dur(p.minutos)} / ${dur(d.tempo_max_min)}</td></tr>`).join('')+'</table></div>';
 }
 
@@ -389,6 +395,23 @@ function moedas(d){
   return d.por_moeda.map(m=>{const w=Math.abs(m.pnl)/mx*50;
     const st=m.pnl>=0?`left:50%;width:${w}%;background:var(--green);box-shadow:0 0 8px var(--green)`:`right:50%;width:${w}%;background:var(--red);box-shadow:0 0 8px var(--red)`;
     return `<div class="hbar"><b>${esc(m.moeda)}</b><div class="track"><i style="${st}"></i></div><span class="${cls(m.pnl)}" style="text-align:right">${usd(m.pnl,1)}</span></div>`}).join('');
+}
+
+function radar(d){
+  if(!d.radar.length) return '<div class="empty">O RADAR APARECE APOS O PRIMEIRO CANDLE FECHADO (ATE 4H)...</div>';
+  const ha=d.radar_ms?Math.round((d.agora_ms-d.radar_ms)/60000):null;
+  const fx=(v,suf)=>v==null?'—':(v>0?'+':'')+v+suf;
+  return `<div class="meta" style="margin:-4px 0 10px">Informativo: aponta moedas com potencial de movimento grande. NAO e sinal de entrada validado. ${ha!=null?'Atualizado ha '+ha+' min.':''}</div>`+
+  '<div class="tbl"><table><tr><th>Moeda</th><th>Nota</th><th>Vies</th><th>Compressao</th><th>Volume</th><th>Forca vs BTC</th><th>Ate romper</th><th>Tendencia</th><th>Funding/ano</th></tr>'+
+  d.radar.map(r=>`<tr><td><b>${esc(r.moeda)}</b></td>
+   <td style="min-width:120px"><div class="bar" style="margin:0;display:inline-block;width:70px;vertical-align:middle"><i style="width:${r.nota}%"></i></div> ${r.nota.toFixed(0)}</td>
+   <td>${r.lado==='-'?'<span class="meta">neutro</span>':`<span class="tag ${r.lado}">${r.lado.toUpperCase()}</span>`}</td>
+   <td class="${r.compressao<=1.2?'pos':''}">${r.compressao.toFixed(2)}x</td>
+   <td class="${r.vol_ratio>=1.5?'pos':''}">${r.vol_ratio.toFixed(2)}x</td>
+   <td class="${cls(r.rs_pct)}">${fx(r.rs_pct,'%')}</td><td>${r.dist_rompimento_pct.toFixed(2)}%</td>
+   <td class="${cls(r.tendencia_pct)}">${fx(r.tendencia_pct,'%')}</td>
+   <td class="${Math.abs(r.funding_apr_pct||0)>=50?'neg':''}">${fx(r.funding_apr_pct,'%')}</td></tr>`).join('')+'</table></div>'+
+  '<div class="meta" style="margin-top:8px">Compressao 1.00x = bandas no ponto mais apertado de 120 candles · Volume = ultimos 6 candles vs 30 anteriores · Funding alto = muita gente de um lado (risco de squeeze)</div>';
 }
 
 function universo(d){
@@ -420,10 +443,10 @@ function render(d){
     kpi('Operacoes',d.operacoes,`taxas pagas ${usd(d.taxas)}`)+
     kpi('Taxa de acerto',d.acerto==null?'—':d.acerto.toFixed(1)+'%',`ganho medio ${usd(d.ganho_medio,1)} · perda media ${usd(d.perda_media,1)}`,'',d.acerto)+
     kpi('Fator de lucro',d.fator_lucro==null?'—':d.fator_lucro.toFixed(2),`maior seq. de perdas: ${d.seq_perdas}`)+
-    kpi('Drawdown max',pct(d.drawdown),'limite p/ real: 15%',d.drawdown>=15?'neg':'',d.drawdown/15*100,1);
+    kpi('Drawdown max',pct(d.drawdown),'limite p/ real: 15% · alav. max '+d.alavancagem_max+'x',d.drawdown>=15?'neg':'',d.drawdown/15*100,1);
   $('curva').innerHTML=curva(d); $('crit').innerHTML=criterios(d); $('posicoes').innerHTML=posicoes(d);
   $('dia').innerHTML=dia(d); $('trades').innerHTML=trades(d); $('moedas').innerHTML=moedas(d);
-  $('universo').innerHTML=universo(d); logs(d);
+  $('universo').innerHTML=universo(d); $('radar').innerHTML=radar(d); logs(d);
 }
 
 let qrFeito=false;
@@ -539,6 +562,7 @@ def main():
     ap.add_argument("--sem-navegador", action="store_true")
     ap.add_argument("--rede", action="store_true", help="libera acesso pelo celular no mesmo Wi-Fi")
     a = ap.parse_args()
+    bot.aplicar_config_ativa(a.dir)
     chave = url_celular = None
     host = "127.0.0.1"
     if a.rede:

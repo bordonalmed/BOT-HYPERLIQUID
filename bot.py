@@ -10,6 +10,7 @@ Bot de PAPER TRADING (simulacao) para perpetuos da Hyperliquid.
 import csv
 import json
 import logging
+import math
 import os
 import signal
 import sys
@@ -27,15 +28,21 @@ CFG = {
     "http_timeout_s": 15,
     "http_tentativas": 3,
     "http_espera_base_s": 2,          # espera crescente: 2s, 4s, ...
-    # universo
+    # universo da estrategia
     "top_n": 10,
     "volume_minimo_usd": 20_000_000,
     "atualizar_universo_s": 3600,
-    # estrategia (configuracao APROVADA pelo otimizador: 4h, stop 3xATR, alvo 3x,
-    # filtro EMA200, RSI larga, max 3 ops/dia, saida apos 48 candles)
+    # radar de assimetria (so informativo; olha mais moedas que a estrategia)
+    "radar_top_n": 30,
+    "radar_volume_minimo_usd": 10_000_000,
+    # estrategia: "tendencia" (EMA/RSI, APROVADA pelo otimizador) ou "rompimento"
+    # (compressao + rompimento + stop movel). So troque para uma estrategia aprovada.
+    "estrategia": "tendencia",
+    # tendencia aprovada: 4h, stop 3xATR, alvo 3x, filtro EMA200, RSI larga,
+    # max 3 ops/dia, saida apos 48 candles
     "intervalo": "4h",
     "intervalo_ms": 4 * 60 * 60 * 1000,
-    "candles_historico": 400,         # precisa de >= 260 para a EMA200
+    "candles_historico": 600,         # janela longa para a EMA200 convergir
     "ema_rapida": 20,
     "ema_lenta": 50,
     "rsi_periodo": 14,
@@ -45,19 +52,30 @@ CFG = {
     "rsi_long": (50, 72),
     "rsi_short": (28, 50),
     "candles_volume_prioridade": 20,
+    # parametros da estrategia de rompimento (usados quando estrategia = "rompimento")
+    "rompimento": {
+        "lookback": 20,               # rompe a maxima/minima dos ultimos N candles
+        "squeeze_fator": 1.2,         # compressao: largura das Bandas de Bollinger perto da minima
+        "squeeze_janela": 120,        #   dos ultimos 120 candles (None desliga)
+        "squeeze_recente": 6,         #   ocorrida nos ultimos 6 candles
+        "vol_mult": 1.5,              # volume do candle >= 1,5x a media de 20 (None desliga)
+    },
     # risco
     "capital_inicial": 50.0,
     "risco_por_trade": 0.015,
     "stop_atr_mult": 3.0,
-    "alvo_mult_stop": 3.0,
-    "tempo_max_min": 48 * 240,        # 48 candles de 4h = 8 dias
-    "alavancagem_max": 2.0,
+    "alvo_mult_stop": 3.0,            # None = sem alvo fixo (deixa o lucro correr)
+    "trailing_atr_mult": None,        # stop movel: maior preco desde a entrada - N x ATR (None desliga)
+    "tempo_max_min": 48 * 240,        # 48 candles de 4h = 8 dias (None desliga)
+    "alavancagem_max": 4.0,           # teto de nocional = 4x o capital (o risco continua 1,5%)
     "nocional_minimo": 10.0,
     "max_posicoes": 2,
     "max_trades_dia": 3,
     "perda_diaria_max": 0.05,
     "taxa_por_lado": 0.00045,
     "slippage_por_lado": 0.0003,
+    "slippage_pequenas": 0.001,       # moedas com volume 24h abaixo de volume_grande_usd
+    "volume_grande_usd": 100_000_000,
     # operacao
     "intervalo_conferencia": "5m",    # candles usados para conferir stop/alvo apos o bot ficar parado
     "loop_s": 30,
@@ -154,10 +172,87 @@ def atr(highs, lows, closes, periodo=14):
     return out
 
 
+def largura_bollinger(closes, periodo=20):
+    """(banda superior - inferior) / media, com 2 desvios-padrao. None no inicio."""
+    n = len(closes)
+    out = [None] * n
+    s = s2 = 0.0
+    for i, x in enumerate(closes):
+        s += x
+        s2 += x * x
+        if i >= periodo:
+            y = closes[i - periodo]
+            s -= y
+            s2 -= y * y
+        if i >= periodo - 1:
+            media = s / periodo
+            var = max(s2 / periodo - media * media, 0.0)
+            out[i] = 4 * math.sqrt(var) / media if media > 0 else None
+    return out
+
+
 # ---------------------------------------------------------------------------
 # ESTRATEGIA
 # ---------------------------------------------------------------------------
+def indicadores_rompimento(candles, cfg=CFG):
+    """Series usadas pela estrategia de rompimento (mesmo codigo no bot e no otimizador)."""
+    closes = [c["c"] for c in candles]
+    highs = [c["h"] for c in candles]
+    lows = [c["l"] for c in candles]
+    return {
+        "c": closes, "h": highs, "l": lows, "v": [c["v"] for c in candles],
+        "atr": atr(highs, lows, closes, cfg["atr_periodo"]),
+        "ef": ema(closes, cfg["filtro_ema"]) if cfg.get("filtro_ema") else None,
+        "bbw": largura_bollinger(closes, 20),
+    }
+
+
+def sinal_rompimento_em(ind, i, p, filtro_ema=None):
+    """Sinal no candle i. p = parametros de rompimento. Retorna dict ou None.
+    LONG: fecha acima da maxima dos ultimos N candles; SHORT: abaixo da minima."""
+    lb = p["lookback"]
+    jan = p.get("squeeze_janela") or 0
+    if i < max(lb, jan, 20) + 20:
+        return None
+    a = ind["atr"][i]
+    if a is None or a <= 0:
+        return None
+    c = ind["c"][i]
+    maxima = max(ind["h"][i - lb:i])
+    minima = min(ind["l"][i - lb:i])
+    if c > maxima:
+        lado = "long"
+    elif c < minima:
+        lado = "short"
+    else:
+        return None
+    if p.get("squeeze_fator"):
+        bbw = ind["bbw"]
+        rec = bbw[i - p["squeeze_recente"]:i]
+        jn = bbw[i - jan:i]
+        if None in rec or None in jn or min(rec) > p["squeeze_fator"] * min(jn):
+            return None
+    if p.get("vol_mult"):
+        media = sum(ind["v"][i - 20:i]) / 20.0
+        if media <= 0 or ind["v"][i] < p["vol_mult"] * media:
+            return None
+    if filtro_ema:
+        ef = ind["ef"][i] if ind.get("ef") else None
+        if ef is None or (lado == "long" and c <= ef) or (lado == "short" and c >= ef):
+            return None
+    return {"lado": lado, "atr": a, "close": c, "nivel": maxima if lado == "long" else minima}
+
+
 def avaliar_sinal(candles, cfg=CFG):
+    if cfg.get("estrategia") == "rompimento":
+        if len(candles) < 60:
+            return None
+        ind = indicadores_rompimento(candles, cfg)
+        return sinal_rompimento_em(ind, len(candles) - 1, cfg["rompimento"], cfg.get("filtro_ema"))
+    return avaliar_sinal_tendencia(candles, cfg)
+
+
+def avaliar_sinal_tendencia(candles, cfg=CFG):
     """Recebe candles fechados (dicts com o,h,l,c,v float) e devolve
     dict com 'lado' ('long'/'short') e indicadores, ou None."""
     if len(candles) < cfg["ema_lenta"] + 10:
@@ -226,34 +321,126 @@ def pnl_liquido(lado, entrada, saida, tamanho, taxa):
 def verificar_saida_candle(pos, c):
     """Confere um candle (maxima/minima). Se tocar stop e alvo no mesmo candle,
     conta STOP (conservador, igual ao backtest). Retorna (motivo, preco) ou None."""
+    alvo = pos.get("alvo")
     if pos["lado"] == "long":
         if c["l"] <= pos["stop"]:
             return "stop", min(c["o"], pos["stop"])
-        if c["h"] >= pos["alvo"]:
-            return "alvo", pos["alvo"]
+        if alvo is not None and c["h"] >= alvo:
+            return "alvo", alvo
     else:
         if c["h"] >= pos["stop"]:
             return "stop", max(c["o"], pos["stop"])
-        if c["l"] <= pos["alvo"]:
-            return "alvo", pos["alvo"]
+        if alvo is not None and c["l"] <= alvo:
+            return "alvo", alvo
     return None
+
+
+def atualizar_trailing(pos, alta, baixa):
+    """Stop movel: acompanha o melhor preco desde a entrada a N x ATR de distancia.
+    So aperta o stop, nunca afrouxa. Chamar DEPOIS de conferir a saida."""
+    mult = pos.get("trailing")
+    if not mult:
+        return
+    dist = mult * pos["atr"]
+    if pos["lado"] == "long":
+        pos["extremo"] = max(pos.get("extremo", pos["entrada"]), alta)
+        pos["stop"] = max(pos["stop"], pos["extremo"] - dist)
+    else:
+        pos["extremo"] = min(pos.get("extremo", pos["entrada"]), baixa)
+        pos["stop"] = min(pos["stop"], pos["extremo"] + dist)
 
 
 def verificar_saida(pos, mid, now_ms, cfg=CFG):
     """Retorna (motivo, preco_referencia) ou None."""
+    alvo = pos.get("alvo")
     if pos["lado"] == "long":
         if mid <= pos["stop"]:
             return "stop", mid          # preenche no preco atual (pior que o stop)
-        if mid >= pos["alvo"]:
-            return "alvo", pos["alvo"]  # preenche no alvo (conservador)
+        if alvo is not None and mid >= alvo:
+            return "alvo", alvo         # preenche no alvo (conservador)
     else:
         if mid >= pos["stop"]:
             return "stop", mid
-        if mid <= pos["alvo"]:
-            return "alvo", pos["alvo"]
-    if now_ms - pos["entrada_ms"] >= cfg["tempo_max_min"] * 60_000:
+        if alvo is not None and mid <= alvo:
+            return "alvo", alvo
+    if cfg.get("tempo_max_min") and now_ms - pos["entrada_ms"] >= cfg["tempo_max_min"] * 60_000:
         return "tempo", mid
     return None
+
+
+def slippage_da_moeda(volume_24h, cfg=CFG):
+    """Moedas com pouco volume tem book mais fino: slippage maior na simulacao."""
+    if volume_24h is not None and volume_24h < cfg.get("volume_grande_usd", 0):
+        return cfg.get("slippage_pequenas", cfg["slippage_por_lado"])
+    return cfg["slippage_por_lado"]
+
+
+def montar_posicao(moeda, lado, entrada, tamanho, atr_val, t_ms, slip, cfg=CFG):
+    dist = cfg["stop_atr_mult"] * atr_val
+    sinal = 1 if lado == "long" else -1
+    alvo = None
+    if cfg.get("alvo_mult_stop"):
+        alvo = entrada + sinal * cfg["alvo_mult_stop"] * dist
+    return {"moeda": moeda, "lado": lado, "entrada": entrada, "tamanho": tamanho,
+            "stop": entrada - sinal * dist, "alvo": alvo, "entrada_ms": t_ms,
+            "atr": atr_val, "trailing": cfg.get("trailing_atr_mult"), "extremo": entrada,
+            "slip": slip}
+
+
+# ---------------------------------------------------------------------------
+# RADAR DE ASSIMETRIA (informativo: NAO e a estrategia validada)
+# ---------------------------------------------------------------------------
+def _lim(x):
+    return max(0.0, min(1.0, x))
+
+
+def metricas_radar(cs, cs_btc=None, ctx=None):
+    """Nota 0-100 de 'potencial de movimento grande' de uma moeda.
+    - compressao: largura das Bandas de Bollinger perto da minima de 120 candles
+    - volume: media dos ultimos 6 candles vs. 30 anteriores
+    - forca relativa: retorno de 30 candles contra o BTC
+    - proximidade do rompimento: distancia ate a maxima/minima de 20 candles
+    - funding extremo: muita gente posicionada para um lado (risco de squeeze)"""
+    if len(cs) < 160:
+        return None
+    closes = [c["c"] for c in cs]
+    bbw = largura_bollinger(closes, 20)
+    jan = [x for x in bbw[-120:] if x]
+    if not jan or not bbw[-1]:
+        return None
+    compressao = bbw[-1] / min(jan)                       # 1.0 = mais comprimido em 120 candles
+    v = [c["v"] * c["c"] for c in cs]
+    vol_ratio = (sum(v[-6:]) / 6) / max(sum(v[-36:-6]) / 30, 1e-9)
+    ret = closes[-1] / closes[-31] - 1
+    rs = ret
+    if cs_btc and len(cs_btc) >= 31:
+        rs = ret - (cs_btc[-1]["c"] / cs_btc[-31]["c"] - 1)
+    maxima = max(c["h"] for c in cs[-21:-1])
+    minima = min(c["l"] for c in cs[-21:-1])
+    preco = closes[-1]
+    dist_max = maxima / preco - 1                          # quanto falta para romper para cima
+    dist_min = 1 - minima / preco                          # quanto falta para romper para baixo
+    e200 = ema(closes, 200)[-1]
+    tendencia = (preco / e200 - 1) if e200 else 0.0
+    funding_apr = None
+    if ctx and ctx.get("funding") is not None:
+        funding_apr = ctx["funding"] * 24 * 365           # funding da Hyperliquid e por hora
+    lado = "-"
+    if tendencia > 0 and rs > 0:
+        lado = "long"
+    elif tendencia < 0 and rs < 0:
+        lado = "short"
+    prox = dist_max if lado != "short" else dist_min
+    nota = 100 * (0.30 * _lim(2.0 - compressao)
+                  + 0.20 * _lim((vol_ratio - 1) / 1.5)
+                  + 0.20 * _lim(abs(rs) / 0.20)
+                  + 0.20 * _lim(1 - max(prox, 0) / 0.05)
+                  + 0.10 * _lim(abs(funding_apr or 0) / 0.5))
+    return {"nota": round(nota, 1), "lado": lado, "compressao": round(compressao, 2),
+            "vol_ratio": round(vol_ratio, 2), "rs_pct": round(rs * 100, 1),
+            "tendencia_pct": round(tendencia * 100, 1), "dist_rompimento_pct": round(prox * 100, 2),
+            "funding_apr_pct": None if funding_apr is None else round(funding_apr * 100, 1),
+            "preco": preco}
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +462,23 @@ def parse_universo(raw, cfg=CFG):
             lista.append((ativo["name"], vol))
     lista.sort(key=lambda x: x[1], reverse=True)
     return lista[:cfg["top_n"]]
+
+
+def parse_ctxs(raw):
+    """{moeda: {funding, oi, volume}} a partir do metaAndAssetCtxs."""
+    meta, ctxs = raw[0], raw[1]
+    out = {}
+    for i, ativo in enumerate(meta["universe"]):
+        if i >= len(ctxs):
+            break
+        c = ctxs[i]
+        try:
+            out[ativo["name"]] = {"funding": float(c.get("funding") or 0),
+                                  "oi": float(c.get("openInterest") or 0),
+                                  "volume": float(c.get("dayNtlVlm") or 0)}
+        except (TypeError, ValueError):
+            continue
+    return out
 
 
 def parse_mids(raw):
@@ -346,7 +550,10 @@ class PaperBot:
         self.path_estado = os.path.join(base_dir, cfg["arquivo_estado"])
         self.path_trades = os.path.join(base_dir, cfg["arquivo_trades"])
         self.path_kill = os.path.join(base_dir, cfg["arquivo_kill"])
-        self.universo = []           # [(moeda, volume)]
+        self.universo = []           # [(moeda, volume)] da estrategia
+        self.universo_amplo = []     # [(moeda, volume)] do radar
+        self.ctxs = {}               # {moeda: {funding, oi, volume}}
+        self.cache_candles = {}      # {moeda: candles fechados} do ultimo candle avaliado
         self.universo_ms = 0
         self.mids = {}
         self.ciclos = 0
@@ -401,7 +608,7 @@ class PaperBot:
         mid = self.mids.get(pos["moeda"])
         if mid is None:
             mid = pos.get("ultimo_mid", pos["entrada"])
-        saida = preco_execucao(mid, pos["lado"], "saida", self.cfg["slippage_por_lado"])
+        saida = preco_execucao(mid, pos["lado"], "saida", pos.get("slip", self.cfg["slippage_por_lado"]))
         pnl, _ = pnl_liquido(pos["lado"], pos["entrada"], saida, pos["tamanho"],
                              self.cfg["taxa_por_lado"])
         return pnl
@@ -410,9 +617,19 @@ class PaperBot:
         return self.estado["capital"] + sum(self.pnl_aberto(p) for p in self.estado["posicoes"])
 
     # ---------- abrir / fechar ----------
+    def _volume(self, moeda):
+        info = self.ctxs.get(moeda)
+        if info:
+            return info["volume"]
+        for m, v in self.universo_amplo or self.universo:
+            if m == moeda:
+                return v
+        return None
+
     def abrir(self, moeda, lado, mid, atr_val, now_ms):
         cfg = self.cfg
-        entrada = preco_execucao(mid, lado, "entrada", cfg["slippage_por_lado"])
+        slip = slippage_da_moeda(self._volume(moeda), cfg)
+        entrada = preco_execucao(mid, lado, "entrada", slip)
         dist = cfg["stop_atr_mult"] * atr_val
         tam = calcular_tamanho(self.estado["capital"], entrada, dist, cfg)
         if tam is None:
@@ -420,22 +637,20 @@ class PaperBot:
                      cfg["nocional_minimo"])
             return False
         tamanho, nocional = tam
-        if lado == "long":
-            stop, alvo = entrada - dist, entrada + cfg["alvo_mult_stop"] * dist
-        else:
-            stop, alvo = entrada + dist, entrada - cfg["alvo_mult_stop"] * dist
-        pos = {"moeda": moeda, "lado": lado, "entrada": entrada, "tamanho": tamanho,
-               "stop": stop, "alvo": alvo, "entrada_ms": now_ms, "ultimo_mid": mid,
-               "conferido_ms": now_ms}
+        pos = montar_posicao(moeda, lado, entrada, tamanho, atr_val, now_ms, slip, cfg)
+        pos["ultimo_mid"] = mid
+        pos["conferido_ms"] = now_ms
         self.estado["posicoes"].append(pos)
         self.estado["trades_hoje"] += 1
-        log.info("ABRIU %s %s | entrada %.6g | tamanho %.6g | nocional US$ %.2f | stop %.6g | alvo %.6g",
-                 lado.upper(), moeda, entrada, tamanho, nocional, stop, alvo)
+        log.info("ABRIU %s %s | entrada %.6g | tamanho %.6g | nocional US$ %.2f (%.1fx) | stop %.6g | alvo %s%s",
+                 lado.upper(), moeda, entrada, tamanho, nocional, nocional / self.estado["capital"],
+                 pos["stop"], "%.6g" % pos["alvo"] if pos["alvo"] is not None else "livre",
+                 " | stop movel %.1fxATR" % pos["trailing"] if pos["trailing"] else "")
         return True
 
     def fechar(self, pos, ref, motivo, now_ms):
         cfg = self.cfg
-        saida = preco_execucao(ref, pos["lado"], "saida", cfg["slippage_por_lado"])
+        saida = preco_execucao(ref, pos["lado"], "saida", pos.get("slip", cfg["slippage_por_lado"]))
         pnl, taxas = pnl_liquido(pos["lado"], pos["entrada"], saida, pos["tamanho"],
                                  cfg["taxa_por_lado"])
         self.estado["capital"] += pnl
@@ -467,7 +682,15 @@ class PaperBot:
         if self.universo and now_ms - self.universo_ms < self.cfg["atualizar_universo_s"] * 1000:
             return
         try:
-            self.universo = parse_universo(self.api.meta_and_ctxs(), self.cfg)
+            raw = self.api.meta_and_ctxs()
+            cfg = self.cfg
+            self.universo_amplo = parse_universo(raw, dict(
+                cfg, top_n=max(cfg.get("radar_top_n", 0), cfg["top_n"]),
+                volume_minimo_usd=min(cfg.get("radar_volume_minimo_usd", cfg["volume_minimo_usd"]),
+                                      cfg["volume_minimo_usd"])))
+            self.universo = [(m, v) for m, v in self.universo_amplo
+                             if v >= cfg["volume_minimo_usd"]][:cfg["top_n"]]
+            self.ctxs = parse_ctxs(raw)
             self.universo_ms = now_ms
             self.estado["universo"] = [[m, v] for m, v in self.universo]
             log.info("UNIVERSO atualizado: %s",
@@ -497,6 +720,7 @@ class PaperBot:
                          pos["moeda"], saida[0], iso_utc(c["T"]))
                 self.fechar(pos, saida[1], saida[0], c["T"])
                 return True
+            atualizar_trailing(pos, c["h"], c["l"])
         if cs:
             pos["conferido_ms"] = cs[-1]["T"] + 1
         return False
@@ -513,6 +737,7 @@ class PaperBot:
             if saida:
                 self.fechar(pos, saida[1], saida[0], now_ms)
             else:
+                atualizar_trailing(pos, mid, mid)
                 pos["conferido_ms"] = now_ms
 
     def _checar_limite_diario(self, now_ms):
@@ -533,11 +758,59 @@ class PaperBot:
         return (not e["pausado"] and len(e["posicoes"]) < self.cfg["max_posicoes"]
                 and e["trades_hoje"] < self.cfg["max_trades_dia"])
 
+    def _ultimo_fechado(self, now_ms):
+        iv = self.cfg["intervalo_ms"]
+        return (now_ms // iv) * iv - iv            # abertura do ultimo candle fechado
+
+    def _buscar_candles(self, moeda, now_ms):
+        """Candles fechados da moeda, reaproveitando o que ja foi baixado neste candle."""
+        ult = self._ultimo_fechado(now_ms)
+        cs = self.cache_candles.get(moeda)
+        if cs and cs[-1]["t"] >= ult:
+            return cs
+        inicio = now_ms - self.cfg["candles_historico"] * self.cfg["intervalo_ms"]
+        cs = parse_candles(self.api.candles(moeda, self.cfg["intervalo"], inicio, now_ms), now_ms)
+        if cs:
+            self.cache_candles[moeda] = cs
+        return cs
+
+    def _atualizar_radar(self, now_ms):
+        """Uma vez por candle novo: nota de assimetria de todas as moedas liquidas."""
+        ult = self._ultimo_fechado(now_ms)
+        if not self.universo_amplo or self.estado.get("radar_candle", 0) >= ult:
+            return
+        moedas = [m for m, _ in self.universo_amplo]
+        btc = None
+        if "BTC" in moedas:
+            moedas.remove("BTC")
+            moedas.insert(0, "BTC")
+        lista = []
+        for moeda in moedas:
+            try:
+                cs = self._buscar_candles(moeda, now_ms)
+            except Exception as e:
+                log.error("Radar: erro ao buscar candles de %s: %s", moeda, e)
+                continue
+            if moeda == "BTC":
+                btc = cs
+            m = metricas_radar(cs, btc, self.ctxs.get(moeda)) if cs else None
+            if m:
+                m["moeda"] = moeda
+                m["volume"] = self._volume(moeda)
+                lista.append(m)
+        if not lista:
+            return
+        lista.sort(key=lambda x: x["nota"], reverse=True)
+        self.estado["radar"] = lista
+        self.estado["radar_candle"] = ult
+        self.estado["radar_ms"] = now_ms
+        log.info("RADAR atualizado (%d moedas). Top 5: %s", len(lista),
+                 ", ".join("%s %.0f %s" % (x["moeda"], x["nota"], x["lado"]) for x in lista[:5]))
+
     def _procurar_entradas(self, now_ms):
         if not self._pode_abrir():
             return
-        iv = self.cfg["intervalo_ms"]
-        ultimo_fechado = (now_ms // iv) * iv - iv   # abertura do ultimo candle fechado
+        ultimo_fechado = self._ultimo_fechado(now_ms)
         abertas = {p["moeda"] for p in self.estado["posicoes"]}
         candidatos = []
         for moeda, _ in self.universo:
@@ -546,8 +819,7 @@ class PaperBot:
             if self.estado["ultimo_candle"].get(moeda, 0) >= ultimo_fechado:
                 continue
             try:
-                inicio = now_ms - self.cfg["candles_historico"] * iv
-                cs = parse_candles(self.api.candles(moeda, self.cfg["intervalo"], inicio, now_ms), now_ms)
+                cs = self._buscar_candles(moeda, now_ms)
             except Exception as e:
                 log.error("Erro ao buscar candles de %s: %s", moeda, e)
                 continue
@@ -562,9 +834,12 @@ class PaperBot:
                 sinal["moeda"] = moeda
                 sinal["vol20"] = volume_usd_recente(cs, self.cfg["candles_volume_prioridade"])
                 candidatos.append(sinal)
-                log.info("SINAL %s %s | close %.6g EMA20 %.6g EMA50 %.6g RSI %.1f ATR %.6g",
-                         sinal["lado"].upper(), moeda, sinal["close"], sinal["ema20"],
-                         sinal["ema50"], sinal["rsi"], sinal["atr"])
+                if "rsi" in sinal:
+                    det = "EMA20 %.6g EMA50 %.6g RSI %.1f" % (sinal["ema20"], sinal["ema50"], sinal["rsi"])
+                else:
+                    det = "rompeu %.6g" % sinal["nivel"]
+                log.info("SINAL %s %s (%s) | close %.6g %s ATR %.6g", sinal["lado"].upper(), moeda,
+                         self.cfg.get("estrategia", "tendencia"), sinal["close"], det, sinal["atr"])
         candidatos.sort(key=lambda s: s["vol20"], reverse=True)
         for s in candidatos:
             if not self._pode_abrir():
@@ -586,6 +861,10 @@ class PaperBot:
         self._atualizar_universo(now_ms)
         self._gerir_posicoes(now_ms)
         self._checar_limite_diario(now_ms)
+        try:
+            self._atualizar_radar(now_ms)
+        except Exception as e:
+            log.error("Erro no radar: %s", e)
         self._procurar_entradas(now_ms)
         self.salvar_estado()
         return True
@@ -595,8 +874,8 @@ class PaperBot:
         return os.path.exists(self.path_kill)
 
     def rodar(self):
-        log.info("Bot de PAPER TRADING iniciado (simulacao, sem dinheiro real). Capital US$ %.4f",
-                 self.estado["capital"])
+        log.info("Bot de PAPER TRADING iniciado (simulacao, sem dinheiro real). Capital US$ %.4f | estrategia %s %s",
+                 self.estado["capital"], self.cfg.get("estrategia", "tendencia"), self.cfg["intervalo"])
         while not self.parar:
             if self._kill():
                 log.info("Arquivo KILL encontrado. Encerrando de forma limpa.")
@@ -647,11 +926,25 @@ def adquirir_lock(caminho):
         return None
 
 
+def aplicar_config_ativa(base, cfg=CFG):
+    """Se existir config_ativa.json (gerado pelo ativar_config.py, so para configuracao
+    aprovada), sobrepoe esses parametros ao CFG."""
+    caminho = os.path.join(base, "config_ativa.json")
+    if not os.path.exists(caminho):
+        return False
+    with open(caminho) as f:
+        extra = json.load(f)
+    cfg.update(extra)
+    log.info("config_ativa.json aplicado: estrategia %s %s", cfg.get("estrategia"), cfg.get("intervalo"))
+    return True
+
+
 def main():
     logging.basicConfig(level=logging.INFO, stream=sys.stdout,
                         format="%(asctime)s UTC | %(levelname)s | %(message)s")
     logging.Formatter.converter = time.gmtime
     base = os.path.dirname(os.path.abspath(__file__))
+    aplicar_config_ativa(base)
     lock = adquirir_lock(os.path.join(base, "bot.lock"))
     if lock is None:
         log.error("O bot ja esta rodando nesta pasta. Esta copia sera encerrada.")

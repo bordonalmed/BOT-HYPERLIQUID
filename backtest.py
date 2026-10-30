@@ -28,11 +28,15 @@ import bot
 import report
 
 
+UNIVERSO_BAIXADO = []   # [(moeda, volume 24h)] do ultimo download
+
+
 def baixar(cfg, dias, api=None):
     api = api or bot.HyperliquidAPI(cfg)
     agora = int(time.time() * 1000)
     inicio = agora - dias * 86_400_000
     universo = bot.parse_universo(api.meta_and_ctxs(), cfg)
+    UNIVERSO_BAIXADO[:] = universo
     print("Universo (top %d por volume ATUAL): %s" % (len(universo), ", ".join(m for m, _ in universo)))
     dados = {}
     for moeda, _ in universo:
@@ -57,19 +61,23 @@ def simular(dados, cfg=bot.CFG, saida_csv=None, sinal_fn=None, t_inicio=None, t_
     iv = cfg["intervalo_ms"]
     idx = {m: {c["t"]: i for i, c in enumerate(cs)} for m, cs in dados.items()}
     tempos = sorted({c["t"] for cs in dados.values() for c in cs})
-    slip, taxa = cfg["slippage_por_lado"], cfg["taxa_por_lado"]
+    taxa = cfg["taxa_por_lado"]
+    slip_moeda = cfg.get("slip_moeda") or {}            # {moeda: slippage} (moedas pequenas = maior)
+
+    def slip_de(m):
+        return slip_moeda.get(m, cfg["slippage_por_lado"])
 
     capital = cfg["capital_inicial"]
     posicoes, pendentes, trades = [], [], []
     dia, eq_dia, trades_hoje, pausado = None, capital, 0, False
 
     def pnl_aberto(p, preco):
-        s = bot.preco_execucao(preco, p["lado"], "saida", slip)
+        s = bot.preco_execucao(preco, p["lado"], "saida", p["slip"])
         return bot.pnl_liquido(p["lado"], p["entrada"], s, p["tamanho"], taxa)[0]
 
     def fechar(p, ref, motivo, t_ms):
         nonlocal capital
-        s = bot.preco_execucao(ref, p["lado"], "saida", slip)
+        s = bot.preco_execucao(ref, p["lado"], "saida", p["slip"])
         pnl, taxas = bot.pnl_liquido(p["lado"], p["entrada"], s, p["tamanho"], taxa)
         capital += pnl
         posicoes.remove(p)
@@ -102,41 +110,29 @@ def simular(dados, cfg=bot.CFG, saida_csv=None, sinal_fn=None, t_inicio=None, t_
             c = candle.get(s["moeda"])
             if c is None or pausado:
                 continue
-            entrada = bot.preco_execucao(c["o"], s["lado"], "entrada", slip)
+            sl = slip_de(s["moeda"])
+            entrada = bot.preco_execucao(c["o"], s["lado"], "entrada", sl)
             dist = cfg["stop_atr_mult"] * s["atr"]
             tam = bot.calcular_tamanho(capital, entrada, dist, cfg)
             if tam is None:
                 continue
-            if s["lado"] == "long":
-                stop, alvo = entrada - dist, entrada + cfg["alvo_mult_stop"] * dist
-            else:
-                stop, alvo = entrada + dist, entrada - cfg["alvo_mult_stop"] * dist
-            posicoes.append({"moeda": s["moeda"], "lado": s["lado"], "entrada": entrada,
-                             "tamanho": tam[0], "stop": stop, "alvo": alvo, "entrada_ms": t})
+            posicoes.append(bot.montar_posicao(s["moeda"], s["lado"], entrada, tam[0], s["atr"], t, sl, cfg))
             trades_hoje += 1
         pendentes = []
 
-        # 2) stop / alvo / tempo com maxima e minima do candle
+        # 2) stop / alvo / tempo com maxima e minima do candle (mesmas funcoes do bot)
         for p in list(posicoes):
             c = candle.get(p["moeda"])
             if c is None:
                 continue
-            if p["lado"] == "long":
-                if c["l"] <= p["stop"]:
-                    fechar(p, min(c["o"], p["stop"]), "stop", c["T"])
-                    continue
-                if c["h"] >= p["alvo"]:
-                    fechar(p, p["alvo"], "alvo", c["T"])
-                    continue
-            else:
-                if c["h"] >= p["stop"]:
-                    fechar(p, max(c["o"], p["stop"]), "stop", c["T"])
-                    continue
-                if c["l"] <= p["alvo"]:
-                    fechar(p, p["alvo"], "alvo", c["T"])
-                    continue
-            if c["T"] + 1 - p["entrada_ms"] >= cfg["tempo_max_min"] * 60_000:
+            saida = bot.verificar_saida_candle(p, c)
+            if saida:
+                fechar(p, saida[1], saida[0], c["T"])
+                continue
+            if cfg.get("tempo_max_min") and c["T"] + 1 - p["entrada_ms"] >= cfg["tempo_max_min"] * 60_000:
                 fechar(p, c["c"], "tempo", c["T"])
+                continue
+            bot.atualizar_trailing(p, c["h"], c["l"])   # stop movel so vale a partir do proximo candle
 
         # 3) limite diario no fechamento
         if not pausado:
@@ -189,6 +185,7 @@ def main():
     ap.add_argument("--saida", default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                                     "backtest_trades.csv"))
     a = ap.parse_args()
+    bot.aplicar_config_ativa(os.path.dirname(os.path.abspath(__file__)))
     cfg = dict(bot.CFG)
     if a.dias is None:
         a.dias = int(4990 * cfg["intervalo_ms"] / 86_400_000)
@@ -200,6 +197,7 @@ def main():
         print("FALHA ao baixar dados: %s" % e)
         sys.exit(1)
     dados = {m: cs for m, cs in dados.items() if len(cs) > max(cfg["ema_lenta"], cfg.get("filtro_ema") or 0) + 10}
+    cfg["slip_moeda"] = {m: bot.slippage_da_moeda(v, cfg) for m, v in UNIVERSO_BAIXADO}
     if not dados:
         print("Sem dados suficientes.")
         sys.exit(1)

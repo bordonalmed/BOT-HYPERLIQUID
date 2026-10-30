@@ -15,7 +15,8 @@ import report  # noqa: E402
 LEGADO = {"intervalo": "15m", "intervalo_ms": 15 * 60 * 1000, "candles_historico": 200,
           "filtro_ema": None, "rsi_long": (52, 68), "rsi_short": (32, 48),
           "stop_atr_mult": 1.5, "alvo_mult_stop": 1.5, "tempo_max_min": 240,
-          "max_trades_dia": 8}
+          "max_trades_dia": 8, "alavancagem_max": 2.0, "estrategia": "tendencia",
+          "trailing_atr_mult": None}
 CFG_APROVADA = dict(bot.CFG)
 
 
@@ -543,3 +544,186 @@ def test_conferencia_sem_toque_mantem_posicao(tmp_path):
     b._gerir_posicoes(bot.agora_ms(rel))
     assert len(b.estado["posicoes"]) == 1
     assert b.estado["posicoes"][0]["conferido_ms"] == bot.agora_ms(rel)
+
+
+# ---------------- rompimento / stop movel / radar ----------------
+def candles_compressao_rompimento(n_lateral=200, lado="long", volume_final=5000.0):
+    """Tendencia, depois lateral bem apertada (compressao) e um candle final que rompe."""
+    cs, preco = [], 100.0
+    for i in range(160):                                   # tendencia previa
+        ant, preco = preco, preco + (0.5 if lado == "long" else -0.5) + (0.8 if i % 2 else -0.8)
+        cs.append({"o": ant, "h": max(ant, preco) + 0.3, "l": min(ant, preco) - 0.3, "c": preco, "v": 1000.0})
+    base = preco
+    for i in range(n_lateral):                             # compressao: amplitude caindo
+        amp = 2.0 * (1 - i / n_lateral) + 0.05
+        ant, preco = preco, base + (amp if i % 2 else -amp) * 0.5
+        cs.append({"o": ant, "h": max(ant, preco) + 0.05, "l": min(ant, preco) - 0.05, "c": preco, "v": 1000.0})
+    ant = preco
+    preco = base + (4.0 if lado == "long" else -4.0)
+    cs.append({"o": ant, "h": max(ant, preco) + 0.1, "l": min(ant, preco) - 0.1, "c": preco, "v": volume_final})
+    for i, c in enumerate(cs):
+        c["t"], c["T"] = T0 + i * IV, T0 + (i + 1) * IV - 1
+    return cs
+
+
+P_ROMP = {"lookback": 20, "squeeze_fator": 1.2, "squeeze_janela": 120, "squeeze_recente": 6, "vol_mult": 1.5}
+
+
+def test_largura_bollinger():
+    assert bot.largura_bollinger([5.0] * 30)[-1] == pytest.approx(0.0)
+    import statistics
+    xs = [float(x % 7) + 10 for x in range(40)]
+    esperado = 4 * statistics.pstdev(xs[-20:]) / (sum(xs[-20:]) / 20)
+    assert bot.largura_bollinger(xs)[-1] == pytest.approx(esperado)
+
+
+def test_rompimento_long_e_short():
+    cfg = dict(bot.CFG, estrategia="rompimento", rompimento=P_ROMP, filtro_ema=None)
+    s = bot.avaliar_sinal(candles_compressao_rompimento(lado="long"), cfg)
+    assert s is not None and s["lado"] == "long"
+    s = bot.avaliar_sinal(candles_compressao_rompimento(lado="short"), cfg)
+    assert s is not None and s["lado"] == "short"
+
+
+def test_rompimento_exige_volume_e_compressao():
+    cfg = dict(bot.CFG, estrategia="rompimento", rompimento=P_ROMP, filtro_ema=None)
+    assert bot.avaliar_sinal(candles_compressao_rompimento(volume_final=1000.0), cfg) is None
+    sem_vol = dict(P_ROMP, vol_mult=None)
+    assert bot.avaliar_sinal(candles_compressao_rompimento(volume_final=1000.0),
+                             dict(cfg, rompimento=sem_vol)) is not None
+    # sem compressao (amplitude constante e alta): o filtro de compressao barra o rompimento
+    cs = candles_compressao_rompimento()
+    for c in cs[160:-1]:
+        c["h"], c["l"] = c["o"] + 3.0, c["o"] - 3.0
+        c["c"] = c["o"] + (2.5 if c["t"] // IV % 2 else -2.5)
+    cs[-1]["c"] = max(c["h"] for c in cs[-21:-1]) + 1.0
+    cs[-1]["h"] = cs[-1]["c"] + 0.1
+    ind = bot.indicadores_rompimento(cs)
+    assert bot.sinal_rompimento_em(ind, len(cs) - 1, dict(P_ROMP, vol_mult=None)) is None
+    assert bot.sinal_rompimento_em(ind, len(cs) - 1, dict(P_ROMP, vol_mult=None, squeeze_fator=None))["lado"] == "long"
+
+
+def test_stop_movel_long_e_short():
+    pos = bot.montar_posicao("X", "long", 100.0, 1.0, 2.0, 0, 0.0,
+                             dict(bot.CFG, stop_atr_mult=2.0, alvo_mult_stop=None, trailing_atr_mult=3.0))
+    assert pos["stop"] == pytest.approx(96.0) and pos["alvo"] is None
+    bot.atualizar_trailing(pos, 110.0, 105.0)
+    assert pos["stop"] == pytest.approx(104.0)          # 110 - 3*2
+    bot.atualizar_trailing(pos, 107.0, 101.0)            # recuo: stop nao afrouxa
+    assert pos["stop"] == pytest.approx(104.0)
+    assert bot.verificar_saida_candle(pos, {"o": 106, "h": 106, "l": 103, "c": 104}) == ("stop", 104.0)
+    sh = bot.montar_posicao("X", "short", 100.0, 1.0, 2.0, 0, 0.0,
+                            dict(bot.CFG, stop_atr_mult=2.0, alvo_mult_stop=None, trailing_atr_mult=3.0))
+    bot.atualizar_trailing(sh, 95.0, 90.0)
+    assert sh["stop"] == pytest.approx(96.0)            # 90 + 3*2
+    assert bot.verificar_saida(sh, 96.5, 0, dict(bot.CFG, tempo_max_min=None)) == ("stop", 96.5)
+
+
+def test_stop_movel_no_bot_ao_vivo(tmp_path):
+    cfg = dict(bot.CFG, alvo_mult_stop=None, trailing_atr_mult=2.0, tempo_max_min=None)
+    b, api, rel = novo_bot(tmp_path, cfg)
+    pos = abrir_long(b, api, mid=100.0, atr=1.0)        # stop 98.53
+    for preco in (101.0, 104.0, 108.0):
+        b.mids = {"BTC": preco}
+        b._gerir_posicoes(bot.agora_ms(rel))
+    assert pos["stop"] == pytest.approx(106.0)          # 108 - 2*1
+    b.mids = {"BTC": 105.5}
+    b._gerir_posicoes(bot.agora_ms(rel))
+    t = ler_trades(tmp_path)[0]
+    assert t["motivo"] == "stop" and float(t["pnl_usd"]) > 0
+
+
+def test_alavancagem_4x():
+    cfg = dict(bot.CFG, alavancagem_max=4.0)
+    tam, noc = bot.calcular_tamanho(50.0, 100.0, 0.1, cfg)
+    assert noc == pytest.approx(200.0)                  # teto 4x
+    tam, noc = bot.calcular_tamanho(50.0, 100.0, 2.0, cfg)
+    assert noc == pytest.approx(37.5)                   # risco 1,5% manda, nao a alavancagem
+
+
+def test_slippage_moedas_pequenas():
+    cfg = dict(bot.CFG, volume_grande_usd=100e6, slippage_pequenas=0.001, slippage_por_lado=0.0003)
+    assert bot.slippage_da_moeda(50e6, cfg) == 0.001
+    assert bot.slippage_da_moeda(500e6, cfg) == 0.0003
+    assert bot.slippage_da_moeda(None, cfg) == 0.0003
+
+
+def test_metricas_radar():
+    cs = candles_compressao_rompimento()
+    btc = gerar_candles(len(cs), sobe=0.6, desce=0.6)
+    m = bot.metricas_radar(cs, btc, {"funding": 0.0001})
+    assert m is not None and 0 <= m["nota"] <= 100
+    assert m["funding_apr_pct"] == pytest.approx(87.6)
+    assert m["compressao"] >= 1.0
+    assert bot.metricas_radar(cs[:100]) is None
+
+
+def test_radar_no_ciclo(tmp_path):
+    agora = T0 + 400 * IV + 5000
+    b, api, rel = novo_bot(tmp_path, agora=agora)
+    api.universo = universo_fake([("BTC", 9e9, False), ("AAA", 5e8, False), ("PEQ", 1.5e7, False)])
+    for c in api.universo[1]:
+        c["funding"] = "0.00002"
+    cs = candles_compressao_rompimento(n_lateral=239)
+    api.candles_por_moeda = {"BTC": gerar_candles(400), "AAA": cs, "PEQ": cs}
+    api.mids = {"BTC": 200.0, "AAA": cs[-1]["c"], "PEQ": cs[-1]["c"]}
+    assert b.ciclo()
+    radar = b.estado["radar"]
+    assert {r["moeda"] for r in radar} == {"BTC", "AAA", "PEQ"}
+    assert [m for m, _ in b.universo] == ["BTC", "AAA"]  # PEQ < 20M: so no radar
+    chamadas = api.chamadas_candles
+    rel.ms += 30_000
+    b.ciclo()
+    assert api.chamadas_candles == chamadas              # mesmo candle: nada de novo
+
+
+def test_backtest_rompimento_com_stop_movel():
+    import backtest
+    cfg = dict(bot.CFG, estrategia="rompimento", rompimento=dict(P_ROMP, vol_mult=None, squeeze_fator=None),
+               filtro_ema=None, alvo_mult_stop=None, trailing_atr_mult=2.0, tempo_max_min=None,
+               stop_atr_mult=1.5)
+    trades = backtest.simular({"AAA": gerar_candles(600)}, cfg)
+    assert trades
+    assert all(t["motivo"] in ("stop", "fim_backtest", "limite_diario") for t in trades)
+
+
+def test_otimizador_rompimento_e_ativacao(tmp_path):
+    import otimizar_rompimento as orr
+    import ativar_config
+    import random
+    random.seed(11)
+    todos = {}
+    for iv, ms in orr.INTERVALOS.items():
+        dados, uni = {}, []
+        for k in range(4):
+            cs, p = [], 100.0
+            for i in range(1200):
+                sig = 0.15 if (i // 150) % 2 == 0 else 0.6
+                drift = 0.08 if (i // 300) % 2 == 0 else -0.08
+                a, p = p, max(1, p + drift + random.gauss(0, sig))
+                cs.append({"t": i * ms, "T": (i + 1) * ms - 1, "o": a, "h": max(a, p) + .1,
+                           "l": min(a, p) - .1, "c": p, "v": random.uniform(50, 150)})
+            dados["C%d" % k] = cs
+            uni.append(["C%d" % k, 5e8 / (k + 1)])
+        todos[iv] = {"universo": uni, "dados": dados}
+    linhas = []
+    escolhida, m_teste, aprovada = orr.otimizar(todos, 0.6, linhas.append)
+    assert escolhida is not None and any("VEREDITO" in l for l in linhas)
+    # ativacao: recusa se nao aprovada, ativa se aprovada
+    origem, destino = str(tmp_path / "m.json"), str(tmp_path / "config_ativa.json")
+    cfg = orr.cfg_de(escolhida, {})
+    pacote = {"parametros": escolhida, "teste": m_teste, "aprovada": False,
+              "cfg_para_o_bot": {"estrategia": "rompimento", "trailing_atr_mult": cfg["trailing_atr_mult"],
+                                 "alvo_mult_stop": None, "rompimento": cfg["rompimento"]}}
+    json.dump(pacote, open(origem, "w"))
+    ok, msg = ativar_config.ativar(origem, destino)
+    assert not ok and not os.path.exists(destino)
+    pacote["aprovada"] = True
+    json.dump(pacote, open(origem, "w"))
+    ok, msg = ativar_config.ativar(origem, destino)
+    assert ok and os.path.exists(destino)
+    c = dict(bot.CFG)
+    assert bot.aplicar_config_ativa(str(tmp_path), c)
+    assert c["estrategia"] == "rompimento" and c["alvo_mult_stop"] is None
+    ok, _ = ativar_config.desativar(destino)
+    assert ok and not os.path.exists(destino)

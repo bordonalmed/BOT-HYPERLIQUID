@@ -172,6 +172,18 @@ def otimizar(todos, frac_treino=0.6, saida=print):
         if k % 50 == 0:
             saida("  %d/%d (%.0fs)" % (k, len(combos), time.time() - t0))
 
+    def rodar_teste(p):
+        dados = todos[p["intervalo"]]
+        _, corte, fim = periodo(dados, frac_treino)
+        return metricas(backtest.simular(dados, cfg_de(p), sinal_fn=fabrica_sinal(prep[p["intervalo"]], p),
+                                         t_inicio=corte + 1, t_fim=fim))
+
+    return selecionar_e_validar(resultados, rodar_teste, fmt, frac_treino, saida)
+
+
+def selecionar_e_validar(resultados, rodar_teste, fmt_p, frac_treino=0.6, saida=print):
+    """resultados: [(parametros, metricas_treino)]. Escolhe a melhor do TREINO (lucro/DD),
+    mostra o top 5 no TESTE e da o veredito SO pela escolhida (sem escolher pelo teste)."""
     validos = [(p, m) for p, m in resultados if m["n"] >= MIN_TRADES_TREINO]
     # ordena por lucro em relacao ao drawdown (evita escolher variacoes muito arriscadas)
     validos.sort(key=lambda x: x[1]["liq"] / max(x[1]["dd"], 5.0), reverse=True)
@@ -182,20 +194,16 @@ def otimizar(todos, frac_treino=0.6, saida=print):
     saida("")
     saida("TOP 10 NO TREINO (primeiros %.0f%% do periodo):" % (frac_treino * 100))
     for p, m in validos[:10]:
-        saida("  " + fmt(p))
+        saida("  " + fmt_p(p))
         saida("      " + fmt_m(m))
 
     saida("")
     saida("VALIDACAO NOS ULTIMOS %.0f%% (dados que o otimizador NAO viu):" % ((1 - frac_treino) * 100))
     testes = []
     for p, m in validos[:5]:
-        dados = todos[p["intervalo"]]
-        _, corte, fim = periodo(dados, frac_treino)
-        tr = backtest.simular(dados, cfg_de(p), sinal_fn=fabrica_sinal(prep[p["intervalo"]], p),
-                              t_inicio=corte + 1, t_fim=fim)
-        mt = metricas(tr)
+        mt = rodar_teste(p)
         testes.append((p, m, mt))
-        saida("  " + fmt(p))
+        saida("  " + fmt_p(p))
         saida("      teste: " + fmt_m(mt))
 
     escolhida, m_treino, m_teste = testes[0]   # a melhor do TREINO, sem escolher pelo teste
@@ -203,7 +211,7 @@ def otimizar(todos, frac_treino=0.6, saida=print):
                 and m_teste["pf"] >= APROVA_PF and m_teste["dd"] < APROVA_DD)
     saida("")
     saida("=" * 70)
-    saida("ESCOLHIDA (melhor do treino): " + fmt(escolhida))
+    saida("ESCOLHIDA (melhor do treino): " + fmt_p(escolhida))
     saida("  treino: " + fmt_m(m_treino))
     saida("  teste : " + fmt_m(m_teste))
     if aprovada:
