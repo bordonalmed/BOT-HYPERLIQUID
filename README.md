@@ -44,6 +44,8 @@ Não envia ordens, não assina nada, não usa carteira, seed, chave privada nem 
 | `16_configurar_env.bat` | Cria o `.env` (a partir do `.env.exemplo`) e abre no Bloco de Notas para você preencher MODO, endereço e chave da API Wallet. |
 | `17_testar_testnet.bat` | Confere chave, saldo, posições e ordens na **testnet**, sem operar. |
 | `18_ordem_teste_testnet.bat` | Abre ~US$ 12 em BTC na **testnet**, coloca stop e alvo na corretora, confere, cancela e fecha. |
+| `19_testar_conta_real.bat` | Confere chave, saldo e posições na **conta real**, sem operar (exige `MODO=real` + `CONFIRMO_DINHEIRO_REAL=SIM`). |
+| `20_ordem_teste_real.bat` | Ordem de teste supervisionada de ~US$ 12 em BTC na **conta real**: abre, coloca stop/alvo, confere e fecha. |
 | `9_dashboard_celular.bat` | Igual ao 8, mas libera o acesso pelo celular no mesmo Wi-Fi. Clique em CELULAR no painel e leia o QR Code. O link tem uma chave de acesso (arquivo `dashboard_chave.txt`); sem ela, outro aparelho recebe acesso negado. Apague esse arquivo para gerar uma chave nova. |
 
 - Configure o Windows para **não suspender** quando estiver na tomada: Configurações → Sistema → Energia → Suspensão = Nunca.

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-Verificador da TESTNET (dinheiro de teste). Usa o .env da pasta, mas SEMPRE na testnet.
-  python testnet_check.py               -> confere chave, saldo, posicoes e ordens (nao opera)
-  python testnet_check.py --ordem-teste -> abre ~US$ 12 em BTC, coloca stop e alvo na corretora,
-                                           confere, cancela e fecha. Pede confirmacao antes.
-A chave privada nunca e impressa.
+Verificador de conexao e de ordens. Usa o .env da pasta.
+  python testnet_check.py                       -> TESTNET: confere chave, saldo, posicoes e ordens
+  python testnet_check.py --ordem-teste         -> TESTNET: abre ~US$ 12 em BTC, coloca stop e alvo,
+                                                   confere, cancela e fecha
+  python testnet_check.py --real [--ordem-teste] -> o mesmo na conta REAL (exige MODO=real e
+                                                   CONFIRMO_DINHEIRO_REAL=SIM no .env)
+Pede confirmacao antes de qualquer ordem. A chave privada nunca e impressa.
 """
 import os
 import sys
@@ -20,12 +22,18 @@ def main():
     if not env:
         print("Arquivo .env nao encontrado. Rode 16_configurar_env.bat primeiro.")
         sys.exit(1)
+    rede = "testnet"
     try:
-        ex = execucao.ExecutorHyperliquid("testnet", env)
+        if "--real" in sys.argv:
+            if execucao.modo_do_env(env) != "real":
+                raise execucao.ErroExecucao("para testar na conta REAL, coloque MODO=real no .env")
+            rede = "real"
+        ex = execucao.ExecutorHyperliquid(rede, env)
     except Exception as e:
         print("FALHA: %s" % e)
         sys.exit(1)
-    print("Conectado na TESTNET. Conta: %s...%s" % (ex.conta[:6], ex.conta[-4:]))
+    nome = "TESTNET (dinheiro de teste)" if rede == "testnet" else "CONTA REAL (DINHEIRO DE VERDADE)"
+    print("Conectado na %s. Conta: %s...%s" % (nome, ex.conta[:6], ex.conta[-4:]))
     valor, livre = ex.conta_valor()
     print("Saldo da conta: US$ %.2f | livre para margem: US$ %.2f" % (valor, livre))
     pos = ex.posicoes()
@@ -33,12 +41,12 @@ def main():
     ordens = ex.ordens_abertas()
     print("Ordens abertas: %d" % len(ordens))
     if valor < 15:
-        print("ATENCAO: saldo baixo. Pegue USDC de teste no faucet da testnet (app.hyperliquid-testnet.xyz).")
+        print("ATENCAO: saldo baixo (precisa de pelo menos ~US$ 15 para a ordem de teste).")
     if "--ordem-teste" not in sys.argv:
-        print("OK: chave e conexao funcionando. Para testar ordens, rode 18_ordem_teste_testnet.bat")
+        print("OK: chave e conexao funcionando.")
         return
 
-    if input("Abrir uma ordem de TESTE de ~US$ 12 em BTC na TESTNET? Digite SIM: ").strip().upper() != "SIM":
+    if input("Abrir uma ordem de TESTE de ~US$ 12 em BTC na %s? Digite SIM: " % nome).strip().upper() != "SIM":
         print("Cancelado.")
         return
     coin = "BTC"
@@ -66,8 +74,8 @@ def main():
     pnl = sum(float(f.get("closedPnl") or 0) for f in fills)
     print("6) Execucoes: %d | PnL bruto US$ %+.4f | taxas US$ %.4f" % (len(fills), pnl, taxas))
     restantes = ex.posicoes().get(coin)
-    print("RESULTADO: %s" % ("OK, ciclo completo funcionou na testnet." if not restantes
-                             else "ATENCAO: ainda ha posicao em BTC, feche pelo site da testnet."))
+    print("RESULTADO: %s" % ("OK, ciclo completo funcionou na %s." % rede if not restantes
+                             else "ATENCAO: ainda ha posicao em BTC, feche pelo site da Hyperliquid."))
 
 
 if __name__ == "__main__":
