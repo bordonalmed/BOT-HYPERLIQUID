@@ -391,3 +391,49 @@ def test_dashboard_chave_de_acesso(tmp_path):
         assert "url_celular" not in d
     finally:
         srv.shutdown()
+
+
+# ---------------- backtest ----------------
+def test_backtest_gera_trades_e_respeita_regras(tmp_path):
+    import backtest
+    import random
+    random.seed(3)
+    dados = {}
+    for k, nome in enumerate(["AAA", "BBB", "CCC"]):
+        cs, preco = [], 100.0 + k
+        for i in range(3000):
+            drift = 0.03 if (i // 400) % 2 == 0 else -0.03
+            ant, preco = preco, max(1.0, preco + drift + random.gauss(0, 0.35))
+            cs.append({"t": T0 + i * IV, "T": T0 + (i + 1) * IV - 1, "o": ant,
+                       "h": max(ant, preco) + abs(random.gauss(0, 0.15)),
+                       "l": min(ant, preco) - abs(random.gauss(0, 0.15)), "c": preco, "v": 100.0})
+        dados[nome] = cs
+    saida = str(tmp_path / "bt.csv")
+    trades = backtest.simular(dados, bot.CFG, saida)
+    assert len(trades) > 10
+    linhas = report.carregar(saida)
+    assert len(linhas) == len(trades)
+    # nunca mais de 8 entradas por dia e nunca mais de 2 posicoes ao mesmo tempo
+    from collections import Counter
+    por_dia = Counter(t["horario_entrada_utc"][:10] for t in trades)
+    assert max(por_dia.values()) <= 8
+    eventos = sorted([(t["horario_entrada_utc"], 1) for t in trades] +
+                     [(t["horario_utc"], -1) for t in trades], key=lambda x: (x[0], x[1]))
+    abertas = 0
+    for _, d in eventos:
+        abertas += d
+        assert abertas <= 2
+    assert {t["motivo"] for t in trades} <= {"stop", "alvo", "tempo", "limite_diario", "fim_backtest"}
+
+
+def test_backtest_candle_toca_stop_e_alvo_conta_stop(tmp_path):
+    import backtest
+    cs = gerar_candles(120)
+    ultimo = cs[-1]
+    # proximo candle: abre em 124, varre de 110 a 140 (toca stop e alvo)
+    cs.append({"t": ultimo["t"] + IV, "T": ultimo["T"] + IV, "o": 124.0, "h": 140.0,
+               "l": 110.0, "c": 125.0, "v": 1000.0})
+    trades = backtest.simular({"AAA": cs}, bot.CFG)
+    ult = trades[-1]
+    assert float(ult["entrada"]) == pytest.approx(124 * 1.0003, rel=1e-6)
+    assert ult["motivo"] == "stop" and ult["lado"] == "long"

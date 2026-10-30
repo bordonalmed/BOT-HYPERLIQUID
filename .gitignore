@@ -13,3 +13,5 @@ __pycache__/
 *.pem
 bot.lock
 dashboard_chave.txt
+backtest_trades.csv
+backtest_resultado.txt
