@@ -344,3 +344,24 @@ def test_relatorio_metricas():
     assert report.drawdown_max_pct(100, [110, 99, 120]) == pytest.approx(10.0)
     assert report.semanas_seguidas_positivas({(2026, 1): 1, (2026, 2): 2, (2026, 4): 1}) == 2
     assert report.semanas_seguidas_positivas({(2026, 1): 1, (2026, 3): 2}) == 1
+
+
+# ---------------- dashboard ----------------
+def test_dashboard_coletar(tmp_path):
+    import dashboard
+    vazio = dashboard.coletar(str(tmp_path))
+    assert vazio["operacoes"] == 0 and vazio["equity"] == pytest.approx(50.0)
+    assert vazio["status"]["online"] is False
+    b, api, rel = novo_bot(tmp_path)
+    abrir_long(b, api)
+    b.mids = {"BTC": 103.0}
+    b._gerir_posicoes(bot.agora_ms(rel))
+    abrir_long(b, api)
+    b.estado["posicoes"][0]["ultimo_mid"] = 101.0
+    b.estado["ultimo_ciclo_ms"] = bot.agora_ms(rel)
+    b.salvar_estado()
+    d = dashboard.coletar(str(tmp_path), agora=rel())
+    assert d["operacoes"] == 1 and d["acerto"] == 100.0
+    assert len(d["posicoes"]) == 1 and d["posicoes"][0]["pnl"] > 0
+    assert d["status"]["online"] is True
+    assert d["equity"] == pytest.approx(d["capital"] + d["posicoes"][0]["pnl"])

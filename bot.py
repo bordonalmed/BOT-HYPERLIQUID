@@ -353,7 +353,15 @@ class PaperBot:
         tmp = self.path_estado + ".tmp"
         with open(tmp, "w") as f:
             json.dump(self.estado, f, indent=2)
-        os.replace(tmp, self.path_estado)
+        # no Windows o replace falha se outro programa (ex.: dashboard) estiver lendo
+        for tentativa in range(10):
+            try:
+                os.replace(tmp, self.path_estado)
+                return
+            except PermissionError:
+                if tentativa == 9:
+                    raise
+                time.sleep(0.1)
 
     def _registrar_trade(self, linha):
         novo = not os.path.exists(self.path_trades)
@@ -436,6 +444,7 @@ class PaperBot:
         try:
             self.universo = parse_universo(self.api.meta_and_ctxs(), self.cfg)
             self.universo_ms = now_ms
+            self.estado["universo"] = [[m, v] for m, v in self.universo]
             log.info("UNIVERSO atualizado: %s",
                      ", ".join(f"{m} ({v / 1e6:.0f}M)" for m, v in self.universo))
         except Exception as e:
@@ -543,6 +552,12 @@ class PaperBot:
             except Exception as e:  # nunca cair
                 log.exception("Erro inesperado no ciclo %d: %s", self.ciclos, e)
                 ok = False
+            self.estado["ultimo_ciclo_ms"] = agora_ms(self.now_fn)
+            self.estado["ultimo_ciclo_ok"] = ok
+            try:
+                self.salvar_estado()
+            except Exception as e:
+                log.error("Erro ao salvar estado: %s", e)
             if self.ciclos == 1 or self.ciclos % self.cfg["heartbeat_ciclos"] == 0:
                 log.info("CICLO %d %s | capital US$ %.4f | equity US$ %.4f | posicoes %d | trades hoje %d | pausado %s",
                          self.ciclos, "concluido" if ok else "com erro", self.estado["capital"],

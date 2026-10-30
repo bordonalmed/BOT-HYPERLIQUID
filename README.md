@@ -8,6 +8,7 @@ Não envia ordens, não assina nada, não usa carteira, seed, chave privada nem 
 |---|---|
 | `bot.py` | O bot. Toda a configuração fica no dicionário `CFG` no topo do arquivo. |
 | `report.py` | Relatório a partir do `trades.csv`. |
+| `dashboard.py` | Painel visual local (somente leitura): capital, curva, posições, operações, critérios e log. Só escuta em 127.0.0.1. |
 | `check_api.py` | Teste real de conexão: busca universo, preços e candles e mostra o parse. |
 | `tests/test_bot.py` | Testes com dados sintéticos (indicadores, sinais, tamanho, stop/alvo/tempo, limite diário, custos, kill switch). |
 | `state.json` | (gerado) Estado salvo: capital, posições abertas, contadores do dia, último candle avaliado por moeda. Permite retomar depois de reiniciar. |
@@ -28,6 +29,7 @@ Não envia ordens, não assina nada, não usa carteira, seed, chave privada nem 
 | `5_relatorio.bat` | Mostra o relatório. |
 | `6_parar_bot.bat` | Cria o arquivo KILL: o bot salva o estado e encerra. |
 | `7_rodar_testes.bat` | Roda os testes automáticos (precisa do passo 1). |
+| `8_dashboard.bat` | Abre o painel visual no navegador (http://localhost:8050). Atualiza a cada 5 s. |
 
 - Configure o Windows para **não suspender** quando estiver na tomada: Configurações → Sistema → Energia → Suspensão = Nunca.
 - Se o notebook dormir ou desligar, o bot para e, ao ligar de novo pelo `3_iniciar_bot.bat`, ele continua de onde parou (`state.json`).
