@@ -1,0 +1,13 @@
+# dados gerados pelo bot (locais)
+state.json
+state.json.tmp
+trades.csv
+bot.log
+nohup.out
+KILL
+__pycache__/
+.pytest_cache/
+# nunca versionar segredos
+.env
+*.key
+*.pem
