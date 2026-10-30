@@ -114,6 +114,44 @@ class ExecutorHyperliquid:
             self.conta = validar_credenciais(env, endereco_agente or "0x" + "0" * 40)
         self.info, self.ex = info, exchange
         self._meta = {a["name"]: a for a in self.info.meta()["universe"]}
+        self.modo_conta = self._ler_modo_conta()
+
+    def _ler_modo_conta(self):
+        """'unifiedAccount', 'portfolioMargin', 'disabled'/'default' ou None se nao der para saber."""
+        try:
+            r = self.info.query_user_abstraction_state(self.conta)
+        except Exception:
+            return None
+        if isinstance(r, dict):
+            r = r.get("abstraction") or r.get("type") or r.get("state")
+        return str(r) if r else None
+
+    def unificada(self, perp_valor=None, spot_total=None):
+        """Conta 'Unified': o USDC fica no saldo spot e serve de margem para os perpetuos."""
+        if self.modo_conta:
+            return self.modo_conta in ("unifiedAccount", "portfolioMargin")
+        # modo desconhecido: se os perpetuos estao zerados e ha USDC no spot, trata como unificada
+        return (perp_valor or 0) < 0.01 and (spot_total or 0) > 0
+
+    def saldo_spot_usdc(self):
+        try:
+            st = self.info.spot_user_state(self.conta)
+        except Exception:
+            return 0.0, 0.0
+        for b in st.get("balances", []):
+            if b.get("coin") == "USDC":
+                return float(b.get("total") or 0), float(b.get("hold") or 0)
+        return 0.0, 0.0
+
+    def detalhes_saldo(self):
+        """Todos os numeros de saldo, para diagnostico."""
+        st = self.info.user_state(self.conta)
+        total, hold = self.saldo_spot_usdc()
+        upnl = sum(float(ap["position"].get("unrealizedPnl") or 0) for ap in st.get("assetPositions", []))
+        return {"modo_conta": self.modo_conta or "desconhecido",
+                "perps_valor": float(st["marginSummary"]["accountValue"]),
+                "perps_livre": float(st.get("withdrawable", 0)),
+                "spot_usdc_total": total, "spot_usdc_em_uso": hold, "pnl_aberto": upnl}
 
     # ---------- leitura ----------
     def sz_decimals(self, coin):
@@ -123,8 +161,12 @@ class ExecutorHyperliquid:
         return int(self._meta[coin].get("maxLeverage", 1))
 
     def conta_valor(self):
-        st = self.info.user_state(self.conta)
-        return float(st["marginSummary"]["accountValue"]), float(st.get("withdrawable", 0))
+        """(valor total da conta, valor livre para margem), nos dois modos de conta."""
+        d = self.detalhes_saldo()
+        if self.unificada(d["perps_valor"], d["spot_usdc_total"]):
+            return (d["spot_usdc_total"] + d["pnl_aberto"],
+                    max(d["spot_usdc_total"] - d["spot_usdc_em_uso"], 0.0))
+        return d["perps_valor"], d["perps_livre"]
 
     def posicoes(self):
         st = self.info.user_state(self.conta)

@@ -945,3 +945,21 @@ def test_livebot_recusa_stop_movel():
     ex, info, exch = novo_executor()
     with pytest.raises(ValueError):
         bot.LiveBot(dict(bot.CFG, trailing_atr_mult=3.0), ex, "testnet", api=FakeAPI(), base_dir=".")
+
+
+def test_conta_unificada_usa_saldo_spot():
+    ex, info, exch = novo_executor()
+    assert ex.modo_conta is None and ex.conta_valor() == (50.0, 50.0)      # conta classica
+    info.estado = {"marginSummary": {"accountValue": "0.0"}, "withdrawable": "0.0",
+                   "assetPositions": [{"position": {"coin": "BTC", "szi": "0.0002", "entryPx": "77000",
+                                                    "unrealizedPnl": "-0.12"}}]}
+    info.spot_user_state = lambda a: {"balances": [{"coin": "USDC", "total": "19.80", "hold": "3.10"}]}
+    info.query_user_abstraction_state = lambda a: "unifiedAccount"
+    ex.modo_conta = ex._ler_modo_conta()
+    assert ex.modo_conta == "unifiedAccount"
+    valor, livre = ex.conta_valor()
+    assert valor == pytest.approx(19.80 - 0.12) and livre == pytest.approx(16.70)
+    # modo desconhecido + perps zerados + USDC no spot => trata como unificada
+    ex.modo_conta = None
+    info.estado["marginSummary"]["accountValue"] = "0.0"
+    assert ex.conta_valor()[0] == pytest.approx(19.68)

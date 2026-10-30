@@ -17,6 +17,13 @@ import execucao
 BASE = os.path.dirname(os.path.abspath(__file__))
 
 
+def mostrar_detalhes(ex):
+    d = ex.detalhes_saldo()
+    print("  [detalhe] modo da conta: %s | perps: US$ %.2f (livre %.2f) | spot USDC: US$ %.2f (em uso %.2f) | PnL aberto: US$ %+.4f"
+          % (d["modo_conta"], d["perps_valor"], d["perps_livre"], d["spot_usdc_total"],
+             d["spot_usdc_em_uso"], d["pnl_aberto"]))
+
+
 def main():
     env = execucao.ler_env(os.path.join(BASE, ".env"))
     if not env:
@@ -36,6 +43,7 @@ def main():
     print("Conectado na %s. Conta: %s...%s" % (nome, ex.conta[:6], ex.conta[-4:]))
     valor, livre = ex.conta_valor()
     print("Saldo da conta: US$ %.2f | livre para margem: US$ %.2f" % (valor, livre))
+    mostrar_detalhes(ex)
     pos = ex.posicoes()
     print("Posicoes abertas: %s" % (", ".join("%s %+g" % (m, p["szi"]) for m, p in pos.items()) or "nenhuma"))
     ordens = ex.ordens_abertas()
@@ -64,6 +72,9 @@ def main():
         time.sleep(3)
         abertas = [o for o in ex.ordens_abertas(coin)]
         print("4) Ordens de protecao visiveis na corretora: %d (esperado: 2)" % len(abertas))
+        v, l = ex.conta_valor()
+        print("   Saldo COM a posicao aberta: US$ %.2f | livre US$ %.2f (deve ficar perto do saldo inicial)" % (v, l))
+        mostrar_detalhes(ex)
     finally:
         n = ex.cancelar_ordens(coin)
         saida = ex.fechar_mercado(coin, 0.01)
@@ -74,6 +85,9 @@ def main():
     pnl = sum(float(f.get("closedPnl") or 0) for f in fills)
     print("6) Execucoes: %d | PnL bruto US$ %+.4f | taxas US$ %.4f" % (len(fills), pnl, taxas))
     restantes = ex.posicoes().get(coin)
+    v, l = ex.conta_valor()
+    print("   Saldo DEPOIS de fechar: US$ %.2f" % v)
+    mostrar_detalhes(ex)
     print("RESULTADO: %s" % ("OK, ciclo completo funcionou na %s." % rede if not restantes
                              else "ATENCAO: ainda ha posicao em BTC, feche pelo site da Hyperliquid."))
 
