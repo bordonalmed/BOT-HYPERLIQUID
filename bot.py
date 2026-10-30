@@ -559,11 +559,33 @@ class PaperBot:
         log.info("Bot encerrado. Estado salvo em %s", self.path_estado)
 
 
+def adquirir_lock(caminho):
+    """Trava de arquivo para impedir duas copias do bot na mesma pasta.
+    Funciona no Windows (msvcrt) e no Linux/Mac (fcntl)."""
+    f = open(caminho, "a+")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return f
+    except OSError:
+        f.close()
+        return None
+
+
 def main():
     logging.basicConfig(level=logging.INFO, stream=sys.stdout,
                         format="%(asctime)s UTC | %(levelname)s | %(message)s")
     logging.Formatter.converter = time.gmtime
     base = os.path.dirname(os.path.abspath(__file__))
+    lock = adquirir_lock(os.path.join(base, "bot.lock"))
+    if lock is None:
+        log.error("O bot ja esta rodando nesta pasta. Esta copia sera encerrada.")
+        sys.exit(1)
     bot = PaperBot(CFG, base_dir=base)
 
     def _sinal(signum, frame):

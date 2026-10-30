@@ -14,7 +14,26 @@ Não envia ordens, não assina nada, não usa carteira, seed, chave privada nem 
 | `trades.csv` | (gerado) Uma linha por operação fechada. |
 | `bot.log` | (gerado) Log em português, uma linha por evento. |
 
-## Instalar
+## Windows (notebook) – jeito fácil
+1. Instale o Python em python.org/downloads e **marque "Add Python to PATH"** na instalação.
+2. Baixe o ZIP do projeto e descompacte numa pasta.
+3. Clique duas vezes, na ordem:
+
+| Arquivo | Para quê |
+|---|---|
+| `1_instalar.bat` | Instala as dependências (só na primeira vez). |
+| `2_testar_conexao.bat` | Confirma que a API da Hyperliquid responde e que o parse funciona. |
+| `3_iniciar_bot.bat` | Liga o bot numa janela minimizada chamada BOT-HYPERLIQUID. |
+| `4_ver_log.bat` | Mostra o log ao vivo (fechar essa janela NÃO para o bot). |
+| `5_relatorio.bat` | Mostra o relatório. |
+| `6_parar_bot.bat` | Cria o arquivo KILL: o bot salva o estado e encerra. |
+| `7_rodar_testes.bat` | Roda os testes automáticos (precisa do passo 1). |
+
+- Configure o Windows para **não suspender** quando estiver na tomada: Configurações → Sistema → Energia → Suspensão = Nunca.
+- Se o notebook dormir ou desligar, o bot para e, ao ligar de novo pelo `3_iniciar_bot.bat`, ele continua de onde parou (`state.json`).
+- O bot não deixa rodar duas cópias na mesma pasta: a segunda se encerra sozinha com aviso no log.
+
+## Instalar (Linux/Mac)
 ```bash
 pip install -r requirements.txt
 ```
