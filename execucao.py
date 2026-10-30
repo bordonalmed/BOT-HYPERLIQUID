@@ -179,6 +179,20 @@ class ExecutorHyperliquid:
                                   "pnl": float(p.get("unrealizedPnl") or 0)}
         return out
 
+    def aportes_desde(self, t_ms):
+        """Depositos menos saques (USDC) desde t_ms, para nao confundir deposito com lucro."""
+        total = 0.0
+        for item in self.info.user_non_funding_ledger_updates(self.conta, int(t_ms)) or []:
+            d = item.get("delta") or {}
+            try:
+                if d.get("type") == "deposit":
+                    total += float(d.get("usdc") or 0)
+                elif d.get("type") == "withdraw":
+                    total -= float(d.get("usdc") or 0) + float(d.get("fee") or 0)
+            except (TypeError, ValueError):
+                continue
+        return total
+
     def ordens_abertas(self, coin=None):
         return [o for o in self.info.frontend_open_orders(self.conta) if coin is None or o["coin"] == coin]
 

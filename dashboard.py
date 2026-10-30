@@ -70,7 +70,8 @@ def coletar(base, cfg=bot.CFG, agora=None, modo="paper"):
     cap_ini = cfg["capital_inicial"]
     ao_vivo = estado.get("modo") in ("testnet", "real")
     if ao_vivo:
-        cap_ini = float(estado.get("capital_inicial_conta", cap_ini))
+        # capital investido = saldo quando o bot comecou + depositos - saques
+        cap_ini = float(estado.get("capital_inicial_conta", cap_ini)) + float(estado.get("aportes", 0.0))
     capital = float(estado.get("capital", cap_ini))
 
     # ---------- posicoes abertas ----------
@@ -373,7 +374,8 @@ function criterios(d){
   h+=it('2 SEMANAS +',semDados?`maior sequencia: ${c.seq_semanas} semana(s)`:`dados insuficientes (${c.semanas} semana(s))`,semOk?'ok':(semDados?'bad':'no'));
   h+=it('DRAWDOWN',`${c.dd.toFixed(2)}% (limite ${c.dd_max}%)`,dd?(c.ops?'ok':'no'):'bad');
   let v;
-  if(!ops||!semDados) v='<span style="color:var(--yel)">DADOS INSUFICIENTES.</span> Continue no paper trading. Nao use dinheiro real ainda.';
+  if(!ops||!semDados) v=d.modo==='paper'?'<span style="color:var(--yel)">DADOS INSUFICIENTES.</span> Continue no paper trading. Nao use dinheiro real ainda.'
+    :'<span style="color:var(--yel)">HISTORICO AINDA CURTO.</span> Acompanhe: so da para avaliar o resultado real depois de 40 operacoes e 2 semanas.';
   else if(ops&&semOk&&dd) v='<span style="color:var(--green)">CRITERIOS ATINGIDOS.</span> Isso nao garante lucro futuro.';
   else v='<span style="color:var(--red)">CRITERIOS NAO ATINGIDOS.</span> Nao use dinheiro real.';
   return h+`<div class="verdict">${v}</div>`;
@@ -449,7 +451,7 @@ function render(d){
   if(d.modo==='testnet'){md.textContent='TESTNET · DINHEIRO DE TESTE';md.className='badge paused'}
   else if(d.modo==='real'){md.textContent='REAL · DINHEIRO DE VERDADE';md.className='badge off'}
   else{md.textContent='SIMULACAO · SEM DINHEIRO REAL';md.className='badge sim'}
-  $('sub').textContent='HYPERLIQUID · PAPER TRADING · '+d.estrategia;
+  $('sub').textContent='HYPERLIQUID · '+({paper:'PAPER TRADING',testnet:'TESTNET',real:'CONTA REAL'}[d.modo]||'PAPER TRADING')+' · '+d.estrategia;
   if(s.pausado){st.className='badge paused';st.innerHTML='<span class="dot"></span>PAUSADO'}
   else if(s.online){st.className='badge on';st.innerHTML='<span class="dot"></span>BOT ONLINE'}
   else{st.className='badge off';st.innerHTML='<span class="dot"></span>BOT OFFLINE'}

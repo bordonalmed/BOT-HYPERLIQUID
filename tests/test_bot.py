@@ -963,3 +963,24 @@ def test_conta_unificada_usa_saldo_spot():
     ex.modo_conta = None
     info.estado["marginSummary"]["accountValue"] = "0.0"
     assert ex.conta_valor()[0] == pytest.approx(19.68)
+
+
+def test_deposito_nao_conta_como_lucro(tmp_path):
+    import dashboard
+    lb, ex, info, exch, api, rel = novo_livebot(tmp_path)
+    info.user_non_funding_ledger_updates = lambda a, t: []
+    lb._sincronizar(bot.agora_ms(rel))
+    assert lb.estado["capital_inicial_conta"] == 50.0 and lb.estado["aportes"] == 0.0
+    # deposito de 30 e saque de 5 (taxa 1) depois do inicio
+    info.estado["marginSummary"]["accountValue"] = "74.0"
+    info.user_non_funding_ledger_updates = lambda a, t: [
+        {"delta": {"type": "deposit", "usdc": "30.0"}},
+        {"delta": {"type": "withdraw", "usdc": "5.0", "fee": "1.0"}},
+        {"delta": {"type": "accountClassTransfer", "usdc": "10", "toPerp": True}}]
+    rel.ms += 6 * 60_000
+    lb._sincronizar(bot.agora_ms(rel))
+    assert lb.estado["aportes"] == pytest.approx(24.0)
+    lb.salvar_estado()
+    d = dashboard.coletar(str(tmp_path), dict(bot.CFG, arquivo_estado="state_testnet.json",
+                                               arquivo_trades="trades_testnet.csv"), agora=rel(), modo="testnet")
+    assert d["capital_inicial"] == pytest.approx(74.0) and d["pnl_total"] == pytest.approx(0.0)

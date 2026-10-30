@@ -954,7 +954,19 @@ class LiveBot(PaperBot):
         self.conta_valor, self.livre = self.ex.conta_valor()
         self.estado["capital"] = self.conta_valor
         self.estado["modo"] = self.modo
-        self.estado.setdefault("capital_inicial_conta", self.conta_valor)
+        if "capital_inicial_conta" not in self.estado:
+            self.estado["capital_inicial_conta"] = self.conta_valor
+            self.estado["inicio_conta_ms"] = now_ms
+        if now_ms - self.estado.get("aportes_ms", 0) >= 5 * 60_000:      # depositos/saques: a cada 5 min
+            try:
+                aportes = self.ex.aportes_desde(self.estado.get("inicio_conta_ms", now_ms))
+                if abs(aportes - self.estado.get("aportes", 0.0)) > 0.005:
+                    log.info("APORTE detectado: depositos - saques desde o inicio = US$ %+.2f "
+                             "(nao conta como lucro)", aportes)
+                self.estado["aportes"] = aportes
+                self.estado["aportes_ms"] = now_ms
+            except Exception as e:
+                log.error("Nao consegui ler depositos/saques: %s", e)
         pos_ex = self.ex.posicoes()
         for pos in list(self.estado["posicoes"]):
             if pos["moeda"] not in pos_ex:
