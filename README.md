@@ -32,6 +32,7 @@ Não envia ordens, não assina nada, não usa carteira, seed, chave privada nem 
 | `7_rodar_testes.bat` | Roda os testes automáticos (precisa do passo 1). |
 | `8_dashboard.bat` | Abre o painel visual no navegador (http://localhost:8050). Atualiza a cada 5 s. |
 | `10_backtest.bat` | Roda a mesma estratégia sobre ~50 dias de histórico real em poucos minutos. Salva `backtest_resultado.txt` e `backtest_trades.csv`. Não mexe no bot ao vivo. |
+| `11_otimizar.bat` | Testa centenas de variações (15m/1h/4h, stop, alvo, filtro EMA200, RSI, limites) nos primeiros 60% do histórico e valida a melhor nos últimos 40%. Salva `otimizacao_resultado.txt` e `melhor_config.json`. |
 | `9_dashboard_celular.bat` | Igual ao 8, mas libera o acesso pelo celular no mesmo Wi-Fi. Clique em CELULAR no painel e leia o QR Code. O link tem uma chave de acesso (arquivo `dashboard_chave.txt`); sem ela, outro aparelho recebe acesso negado. Apague esse arquivo para gerar uma chave nova. |
 
 - Configure o Windows para **não suspender** quando estiver na tomada: Configurações → Sistema → Energia → Suspensão = Nunca.

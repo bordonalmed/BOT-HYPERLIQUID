@@ -15,3 +15,6 @@ bot.lock
 dashboard_chave.txt
 backtest_trades.csv
 backtest_resultado.txt
+cache_candles_*.json
+otimizacao_resultado.txt
+melhor_config.json

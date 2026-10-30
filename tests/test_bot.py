@@ -437,3 +437,36 @@ def test_backtest_candle_toca_stop_e_alvo_conta_stop(tmp_path):
     ult = trades[-1]
     assert float(ult["entrada"]) == pytest.approx(124 * 1.0003, rel=1e-6)
     assert ult["motivo"] == "stop" and ult["lado"] == "long"
+
+
+# ---------------- otimizador ----------------
+def test_otimizador_roda_e_separa_treino_teste():
+    import otimizar
+    import random
+    random.seed(5)
+    todos = {}
+    for iv, ms in otimizar.INTERVALOS.items():
+        d = {}
+        for k in range(3):
+            cs, p = [], 100.0
+            for i in range(1500):
+                drift = 0.05 if (i // 300) % 2 == 0 else -0.05
+                a, p = p, max(1, p + drift + random.gauss(0, 0.4))
+                cs.append({"t": i * ms, "T": (i + 1) * ms - 1, "o": a, "h": max(a, p) + .1,
+                           "l": min(a, p) - .1, "c": p, "v": 10})
+            d["C%d" % k] = cs
+        todos[iv] = d
+    ini, corte, fim = otimizar.periodo(todos["1h"], 0.6)
+    assert ini < corte < fim
+    linhas = []
+    escolhida, m_teste, aprovada = otimizar.otimizar(todos, 0.6, linhas.append)
+    assert escolhida is not None and isinstance(aprovada, bool)
+    assert any("VEREDITO" in l for l in linhas)
+
+
+def test_simular_respeita_periodo():
+    import backtest
+    cs = gerar_candles(400)
+    corte = cs[300]["t"]
+    trades = backtest.simular({"AAA": cs}, bot.CFG, t_fim=corte)
+    assert all(t["horario_utc"] <= bot.iso_utc(corte + IV) for t in trades)

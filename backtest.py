@@ -28,8 +28,8 @@ import bot
 import report
 
 
-def baixar(cfg, dias):
-    api = bot.HyperliquidAPI(cfg)
+def baixar(cfg, dias, api=None):
+    api = api or bot.HyperliquidAPI(cfg)
     agora = int(time.time() * 1000)
     inicio = agora - dias * 86_400_000
     universo = bot.parse_universo(api.meta_and_ctxs(), cfg)
@@ -49,8 +49,10 @@ def baixar(cfg, dias):
     return dados
 
 
-def simular(dados, cfg=bot.CFG, saida_csv=None):
-    """dados: {moeda: [candles fechados ordenados]}. Retorna lista de trades (dicts)."""
+def simular(dados, cfg=bot.CFG, saida_csv=None, sinal_fn=None, t_inicio=None, t_fim=None):
+    """dados: {moeda: [candles fechados ordenados]}. Retorna lista de trades (dicts).
+    sinal_fn(moeda, i) opcional substitui o calculo de sinal (usado pelo otimizador).
+    t_inicio/t_fim limitam o periodo operado (o historico anterior serve de aquecimento)."""
     janela = cfg["candles_historico"]
     iv = cfg["intervalo_ms"]
     idx = {m: {c["t"]: i for i, c in enumerate(cs)} for m, cs in dados.items()}
@@ -80,9 +82,13 @@ def simular(dados, cfg=bot.CFG, saida_csv=None):
 
     ultimo_close = {}
     for t in tempos:
+        if t_fim is not None and t > t_fim:
+            break
         candle = {m: dados[m][idx[m][t]] for m in dados if t in idx[m]}
         for m, c in candle.items():
             ultimo_close[m] = c["c"]
+        if t_inicio is not None and t < t_inicio:
+            continue
 
         # novo dia UTC
         d = bot.dia_utc(t)
@@ -150,18 +156,23 @@ def simular(dados, cfg=bot.CFG, saida_csv=None):
             if m in abertas:
                 continue
             i = idx[m][t]
-            hist = dados[m][max(0, i + 1 - janela):i + 1]
-            sinal = bot.avaliar_sinal(hist, cfg)
+            if sinal_fn is not None:
+                sinal = sinal_fn(m, i)
+            else:
+                hist = dados[m][max(0, i + 1 - janela):i + 1]
+                sinal = bot.avaliar_sinal(hist, cfg)
+                if sinal:
+                    sinal["vol20"] = bot.volume_usd_recente(hist, cfg["candles_volume_prioridade"])
             if sinal:
                 sinal["moeda"] = m
-                sinal["vol20"] = bot.volume_usd_recente(hist, cfg["candles_volume_prioridade"])
                 cands.append(sinal)
         cands.sort(key=lambda s: s["vol20"], reverse=True)
         pendentes = cands[:min(vagas, cfg["max_trades_dia"] - trades_hoje)]
 
     # fecha o que sobrou no ultimo preco
+    t_final = min(tempos[-1], t_fim) if t_fim is not None else tempos[-1]
     for p in list(posicoes):
-        fechar(p, ultimo_close[p["moeda"]], "fim_backtest", tempos[-1] + iv - 1)
+        fechar(p, ultimo_close[p["moeda"]], "fim_backtest", t_final + iv - 1)
 
     if saida_csv:
         with open(saida_csv, "w", newline="") as f:
