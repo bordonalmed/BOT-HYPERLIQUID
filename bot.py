@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 
 import requests
 
+import execucao
+
 # ---------------------------------------------------------------------------
 # CONFIGURACAO
 # ---------------------------------------------------------------------------
@@ -83,6 +85,10 @@ CFG = {
     "arquivo_estado": "state.json",
     "arquivo_trades": "trades.csv",
     "arquivo_kill": "KILL",
+    "arquivo_kill_fechar": "KILL_FECHAR",  # modo testnet/real: fecha tudo a mercado e encerra
+    # execucao real (MODO=testnet ou real no .env)
+    "slippage_max_ordem": 0.01,       # ordem a mercado nao executa se o preco andar mais que 1%
+    "capital_max_real": 60.0,         # o bot dimensiona como se a conta tivesse no maximo isto
 }
 
 TRADES_CAMPOS = [
@@ -874,7 +880,11 @@ class PaperBot:
         return os.path.exists(self.path_kill)
 
     def rodar(self):
-        log.info("Bot de PAPER TRADING iniciado (simulacao, sem dinheiro real). Capital US$ %.4f | estrategia %s %s",
+        modo = getattr(self, "modo", "paper")
+        rotulo = {"paper": "PAPER TRADING (simulacao, sem dinheiro real)",
+                  "testnet": "TESTNET (ordens reais com dinheiro de TESTE)",
+                  "real": "REAL (ORDENS COM DINHEIRO DE VERDADE)"}[modo]
+        log.info("Bot iniciado em modo %s | capital US$ %.4f | estrategia %s %s", rotulo,
                  self.estado["capital"], self.cfg.get("estrategia", "tendencia"), self.cfg["intervalo"])
         while not self.parar:
             if self._kill():
@@ -906,6 +916,223 @@ class PaperBot:
         except Exception as e:
             log.error("Erro ao salvar estado na saida: %s", e)
         log.info("Bot encerrado. Estado salvo em %s", self.path_estado)
+
+
+# ---------------------------------------------------------------------------
+# BOT COM ORDENS NA CORRETORA (testnet ou real)
+# ---------------------------------------------------------------------------
+class LiveBot(PaperBot):
+    """Mesma estrategia, limites e radar do PaperBot, mas executando na Hyperliquid.
+    - Stop e alvo ficam como ordens na corretora (valem com o notebook desligado).
+    - A corretora e a fonte da verdade: saldo e posicoes sao lidos de la a cada ciclo.
+    - Sinais e universo usam os dados da rede principal (testnet tem pouco volume)."""
+
+    def __init__(self, cfg, executor, modo, api=None, base_dir=".", now_fn=time.time):
+        if cfg.get("trailing_atr_mult"):
+            raise ValueError("stop movel ainda nao e suportado no modo testnet/real")
+        if not cfg.get("alvo_mult_stop"):
+            raise ValueError("modo testnet/real exige alvo fixo (alvo_mult_stop)")
+        cfg = dict(cfg, arquivo_estado="state_%s.json" % modo, arquivo_trades="trades_%s.csv" % modo)
+        self.ex = executor
+        self.modo = modo
+        self.conta_valor = None
+        self.livre = 0.0
+        self.avisadas = set()
+        super().__init__(cfg, api, base_dir, now_fn)
+        self.path_kill_fechar = os.path.join(base_dir, cfg["arquivo_kill_fechar"])
+
+    # ---------- contas ----------
+    def equity(self):
+        return self.conta_valor if self.conta_valor is not None else self.estado["capital"]
+
+    def _capital_operacional(self):
+        cap = self.cfg.get("capital_max_real")
+        return min(self.conta_valor, cap) if cap else self.conta_valor
+
+    # ---------- sincronizacao com a corretora ----------
+    def _sincronizar(self, now_ms):
+        self.conta_valor, self.livre = self.ex.conta_valor()
+        self.estado["capital"] = self.conta_valor
+        self.estado["modo"] = self.modo
+        self.estado.setdefault("capital_inicial_conta", self.conta_valor)
+        pos_ex = self.ex.posicoes()
+        for pos in list(self.estado["posicoes"]):
+            if pos["moeda"] not in pos_ex:
+                self._finalizar(pos, pos.get("motivo_saida"), now_ms)
+            else:
+                pos["tamanho"] = abs(pos_ex[pos["moeda"]]["szi"])
+                pos["pnl_corretora"] = pos_ex[pos["moeda"]].get("pnl")
+        geridas = {p["moeda"] for p in self.estado["posicoes"]}
+        for m in pos_ex:
+            if m not in geridas and m not in self.avisadas:
+                log.warning("POSICAO DESCONHECIDA em %s na corretora (nao foi aberta por este bot): nao sera gerida", m)
+                self.avisadas.add(m)
+        pendentes = [p for p in self.estado["posicoes"]
+                     if not p.get("motivo_saida") and p["moeda"] in pos_ex]
+        if pendentes:
+            abertas = {int(o["oid"]) for o in self.ex.ordens_abertas()}
+            for pos in pendentes:
+                faltam = [t for t, k in (("sl", "oid_stop"), ("tp", "oid_alvo"))
+                          if pos.get(k) is None or pos[k] not in abertas]
+                if faltam:
+                    log.warning("Protecao ausente em %s (%s): recolocando", pos["moeda"], "+".join(faltam))
+                    try:
+                        self._proteger(pos, faltam)
+                    except Exception as e:
+                        log.error("Nao consegui recolocar protecao em %s: %s. Fechando por seguranca.", pos["moeda"], e)
+                        self.fechar(pos, None, "sem_protecao", now_ms)
+
+    def _proteger(self, pos, tipos=("sl", "tp")):
+        for tipo in tipos:
+            preco = pos["stop"] if tipo == "sl" else pos["alvo"]
+            oid = self.ex.colocar_protecao(pos["moeda"], pos["lado"], pos["tamanho"], preco, tipo)
+            pos["oid_stop" if tipo == "sl" else "oid_alvo"] = oid
+
+    def _finalizar(self, pos, motivo, now_ms):
+        """Posicao nao existe mais na corretora: registra o resultado real (fills)."""
+        m = pos["moeda"]
+        try:
+            self.ex.cancelar_ordens(m)                 # cancela a protecao que sobrou (stop ou alvo)
+            fills = self.ex.fills_desde(m, pos["entrada_ms"] - 5000)
+        except Exception as e:
+            log.error("Erro ao ler execucoes de %s: %s (tento de novo no proximo ciclo)", m, e)
+            return False
+        fech = [f for f in fills if str(f.get("dir", "")).startswith("Close") or float(f.get("closedPnl") or 0) != 0]
+        if not fech:
+            pos.setdefault("sumiu_ms", now_ms)
+            if now_ms - pos["sumiu_ms"] < 5 * 60_000:
+                return False                           # execucao ainda nao apareceu: espera
+            log.warning("Posicao de %s sumiu sem execucoes registradas; registrando sem PnL", m)
+        sz = sum(float(f["sz"]) for f in fech)
+        saida = (sum(float(f["px"]) * float(f["sz"]) for f in fech) / sz) if sz else pos.get("ultimo_mid", pos["entrada"])
+        taxas = sum(float(f.get("fee") or 0) for f in fills)
+        pnl = sum(float(f.get("closedPnl") or 0) for f in fech) - taxas
+        if not motivo:
+            d_stop, d_alvo = abs(saida - pos["stop"]), abs(saida - pos["alvo"])
+            motivo = "stop" if d_stop <= d_alvo else "alvo"
+            if min(d_stop, d_alvo) / saida > 0.01:
+                motivo = "corretora"
+        try:
+            self.conta_valor, self.livre = self.ex.conta_valor()
+            self.estado["capital"] = self.conta_valor
+        except Exception:
+            pass
+        self.estado["posicoes"].remove(pos)
+        self._registrar_trade({
+            "horario_utc": iso_utc(now_ms), "moeda": m, "lado": pos["lado"],
+            "entrada": f"{pos['entrada']:.8g}", "saida": f"{saida:.8g}",
+            "tamanho": f"{pos['tamanho']:.8g}", "motivo": motivo,
+            "pnl_usd": f"{pnl:.6f}", "capital_apos": f"{self.estado['capital']:.6f}",
+            "taxas_usd": f"{taxas:.6f}", "horario_entrada_utc": iso_utc(pos["entrada_ms"]),
+        })
+        log.info("FECHOU [%s] %s %s | motivo %s | entrada %.6g | saida %.6g | PnL US$ %+.4f | conta US$ %.4f",
+                 self.modo.upper(), pos["lado"].upper(), m, motivo, pos["entrada"], saida, pnl,
+                 self.estado["capital"])
+        return True
+
+    # ---------- abrir / fechar ----------
+    def abrir(self, moeda, lado, mid, atr_val, now_ms):
+        cfg = self.cfg
+        if moeda not in self.ex._meta:
+            log.info("IGNORADA %s: moeda nao existe na %s", moeda, self.modo)
+            return False
+        capital = self._capital_operacional()
+        dist = cfg["stop_atr_mult"] * atr_val
+        tam = calcular_tamanho(capital, mid, dist, cfg)
+        sz = execucao.arredondar_tamanho(tam[0], self.ex.sz_decimals(moeda)) if tam else 0.0
+        nocional = sz * mid
+        if nocional < cfg["nocional_minimo"]:
+            log.info("IGNORADA %s %s: nocional US$ %.2f abaixo do minimo de US$ %.0f",
+                     moeda, lado.upper(), nocional, cfg["nocional_minimo"])
+            return False
+        try:
+            lev = self.ex.definir_alavancagem(moeda, cfg["alavancagem_max"])
+            if nocional / lev > self.livre * 0.95:
+                log.info("IGNORADA %s: margem insuficiente (precisa US$ %.2f, livre US$ %.2f)",
+                         moeda, nocional / lev, self.livre)
+                return False
+            preco, sz_exec = self.ex.abrir_mercado(moeda, lado, sz, cfg["slippage_max_ordem"])
+        except Exception as e:
+            log.error("ERRO ao abrir %s %s: %s", lado.upper(), moeda, e)
+            return False
+        pos = montar_posicao(moeda, lado, preco, sz_exec, atr_val, now_ms, 0.0, cfg)
+        pos.update(ultimo_mid=mid, conferido_ms=now_ms, oid_stop=None, oid_alvo=None, alavancagem=lev)
+        self.estado["posicoes"].append(pos)
+        self.estado["trades_hoje"] += 1
+        self.salvar_estado()
+        try:
+            self._proteger(pos)
+        except Exception as e:
+            log.error("FALHA ao colocar stop/alvo em %s: %s. Fechando a posicao por seguranca.", moeda, e)
+            self.fechar(pos, mid, "sem_protecao", now_ms)
+            return False
+        log.info("ABRIU [%s] %s %s | entrada %.6g | tamanho %.6g | nocional US$ %.2f | alav. %dx isolada | "
+                 "stop %.6g | alvo %.6g (ordens na corretora)", self.modo.upper(), lado.upper(), moeda,
+                 preco, sz_exec, sz_exec * preco, lev, pos["stop"], pos["alvo"])
+        self.salvar_estado()
+        return True
+
+    def fechar(self, pos, ref, motivo, now_ms):
+        """Fecha a mercado na corretora. O registro (com o preco real) acontece quando a
+        sincronizacao confirmar que a posicao sumiu."""
+        m = pos["moeda"]
+        try:
+            self.ex.cancelar_ordens(m)
+            self.ex.fechar_mercado(m, self.cfg["slippage_max_ordem"])
+        except Exception as e:
+            log.error("ERRO ao fechar %s (%s): %s. Tento de novo no proximo ciclo.", m, motivo, e)
+            return 0.0
+        pos["motivo_saida"] = motivo
+        log.info("FECHANDO [%s] %s %s a mercado | motivo %s", self.modo.upper(), pos["lado"].upper(), m, motivo)
+        return 0.0
+
+    # ---------- ciclo ----------
+    def _gerir_posicoes(self, now_ms):
+        for pos in list(self.estado["posicoes"]):
+            if pos.get("motivo_saida"):
+                continue
+            mid = self.mids.get(pos["moeda"])
+            if mid is not None:
+                pos["ultimo_mid"] = mid
+            tmax = self.cfg.get("tempo_max_min")
+            if tmax and now_ms - pos["entrada_ms"] >= tmax * 60_000:
+                self.fechar(pos, mid, "tempo", now_ms)
+
+    def ciclo(self):
+        now_ms = agora_ms(self.now_fn)
+        try:
+            self.mids = parse_mids(self.api.all_mids())
+        except Exception as e:
+            log.error("Erro ao buscar precos: %s (tentando no proximo ciclo)", e)
+            return False
+        try:
+            self._sincronizar(now_ms)
+        except Exception as e:
+            log.error("Erro ao sincronizar com a corretora: %s (tentando no proximo ciclo)", e)
+            return False
+        if os.path.exists(self.path_kill_fechar):
+            log.warning("KILL_FECHAR encontrado: fechando todas as posicoes a mercado e encerrando.")
+            for pos in list(self.estado["posicoes"]):
+                if not pos.get("motivo_saida"):
+                    self.fechar(pos, None, "kill", now_ms)
+            try:
+                os.remove(self.path_kill_fechar)
+            except OSError:
+                pass
+            self.salvar_estado()
+            self.parar = True
+            return True
+        self._checar_novo_dia(now_ms)
+        self._atualizar_universo(now_ms)
+        self._gerir_posicoes(now_ms)
+        self._checar_limite_diario(now_ms)
+        try:
+            self._atualizar_radar(now_ms)
+        except Exception as e:
+            log.error("Erro no radar: %s", e)
+        self._procurar_entradas(now_ms)
+        self.salvar_estado()
+        return True
 
 
 def adquirir_lock(caminho):
@@ -949,7 +1176,18 @@ def main():
     if lock is None:
         log.error("O bot ja esta rodando nesta pasta. Esta copia sera encerrada.")
         sys.exit(1)
-    bot = PaperBot(CFG, base_dir=base)
+    env = execucao.ler_env(os.path.join(base, ".env"))
+    try:
+        modo = execucao.modo_do_env(env)
+        if modo == "paper":
+            bot = PaperBot(CFG, base_dir=base)
+        else:
+            log.warning("MODO %s: o bot vai ENVIAR ORDENS para a Hyperliquid %s.", modo.upper(),
+                        "TESTNET (dinheiro de teste)" if modo == "testnet" else "REAL (DINHEIRO DE VERDADE)")
+            bot = LiveBot(CFG, execucao.ExecutorHyperliquid(modo, env), modo, base_dir=base)
+    except Exception as e:
+        log.error("Nao foi possivel iniciar: %s", e)
+        sys.exit(1)
 
     def _sinal(signum, frame):
         log.info("Sinal %s recebido. Encerrando...", signum)

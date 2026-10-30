@@ -12,6 +12,8 @@ Não envia ordens, não assina nada, não usa carteira, seed, chave privada nem 
 | `backtest.py` | Backtest com o histórico de candles 15m (~52 dias disponíveis na API). Entrada na abertura do candle seguinte ao sinal; stop/alvo pela máxima/mínima; se o candle tocar os dois, conta stop. |
 | `otimizar_rompimento.py` | Otimizador da estratégia de rompimento (usa a mesma função de sinal do bot). |
 | `ativar_config.py` | Ativa/desativa a configuração aprovada do otimizador de rompimento. |
+| `execucao.py` | Única parte que envia ordens (SDK oficial). Lê a chave só do `.env`, recusa a chave da carteira principal. |
+| `testnet_check.py` | Verificador da testnet usado pelos `.bat` 17 e 18. |
 | `check_api.py` | Teste real de conexão: busca universo, preços e candles e mostra o parse. |
 | `tests/test_bot.py` | Testes com dados sintéticos (indicadores, sinais, tamanho, stop/alvo/tempo, limite diário, custos, kill switch). |
 | `state.json` | (gerado) Estado salvo: capital, posições abertas, contadores do dia, último candle avaliado por moeda. Permite retomar depois de reiniciar. |
@@ -39,6 +41,9 @@ Não envia ordens, não assina nada, não usa carteira, seed, chave privada nem 
 | `13_otimizar_rompimento.bat` | Otimizador da estratégia de **rompimento com stop móvel** (busca de assimetria): 1h/4h, 10 ou 30 moedas, 384 variações, treino 60% / teste 40%. |
 | `14_ativar_rompimento.bat` | Ativa no bot a configuração de rompimento **só se o otimizador aprovou** (gera `config_ativa.json`). Reinicie o bot depois. |
 | `15_voltar_estrategia_padrao.bat` | Remove o `config_ativa.json` e volta para a estratégia padrão (tendência 4h). |
+| `16_configurar_env.bat` | Cria o `.env` (a partir do `.env.exemplo`) e abre no Bloco de Notas para você preencher MODO, endereço e chave da API Wallet. |
+| `17_testar_testnet.bat` | Confere chave, saldo, posições e ordens na **testnet**, sem operar. |
+| `18_ordem_teste_testnet.bat` | Abre ~US$ 12 em BTC na **testnet**, coloca stop e alvo na corretora, confere, cancela e fecha. |
 | `9_dashboard_celular.bat` | Igual ao 8, mas libera o acesso pelo celular no mesmo Wi-Fi. Clique em CELULAR no painel e leia o QR Code. O link tem uma chave de acesso (arquivo `dashboard_chave.txt`); sem ela, outro aparelho recebe acesso negado. Apague esse arquivo para gerar uma chave nova. |
 
 - Configure o Windows para **não suspender** quando estiver na tomada: Configurações → Sistema → Energia → Suspensão = Nunca.
@@ -122,6 +127,23 @@ se **ainda não há dados suficientes**.
   (volume ≥ US$ 10 M) combinando compressão, volume crescente, força relativa contra o BTC, proximidade do rompimento
   e funding extremo. **É informativo**: aponta onde olhar, não é sinal de entrada validado.
 - Fluxo recomendado: `13_otimizar_rompimento.bat` → se **APROVADA**, `14_ativar_rompimento.bat` → reiniciar o bot → paper trading.
+
+## Modo TESTNET / REAL (ordens na corretora)
+O padrão continua sendo **paper** (simulação). Para mandar ordens:
+1. Instale o **Python 3.12** (o SDK oficial exige 3.9+) e rode `1_instalar.bat` de novo.
+2. No site da testnet (app.hyperliquid-testnet.xyz): pegue USDC de teste no faucet e crie uma **API Wallet** (More → API).
+3. `16_configurar_env.bat`: preencha `MODO=testnet`, `HL_ACCOUNT_ADDRESS` (sua carteira principal) e `HL_SECRET_KEY` (chave da **API Wallet**).
+4. `17_testar_testnet.bat` e depois `18_ordem_teste_testnet.bat`.
+5. `3_iniciar_bot.bat`: o bot passa a operar na testnet (arquivos `state_testnet.json` e `trades_testnet.csv`, separados do paper).
+
+Como funciona ao vivo:
+- **Stop e alvo são ordens na corretora** (reduce-only): valem mesmo com o notebook desligado. Se não for possível colocá-los, o bot fecha a posição na hora.
+- **A corretora é a fonte da verdade**: saldo, posições e resultados (preço e taxas reais) vêm de lá. Ao reiniciar, o bot reconcilia tudo e recoloca proteções que faltarem.
+- **Margem isolada**, alavancagem até 4x (limitada ao máximo da moeda). Ordens a mercado com proteção de 1% de slippage.
+- Sinais e universo usam os dados da rede principal (a testnet tem pouco volume); as ordens vão para a testnet.
+- `KILL` para o bot e **mantém** as posições com stop/alvo na corretora. `KILL_FECHAR` fecha tudo a mercado e para.
+- **REAL** exige `MODO=real` **e** `CONFIRMO_DINHEIRO_REAL=SIM` no `.env`. O bot dimensiona como se a conta tivesse no máximo `capital_max_real` (US$ 60).
+- **Segurança:** use só a API Wallet (opera, não saca). Nunca coloque a chave da carteira principal; o bot recusa. Nunca envie o `.env` para ninguém.
 
 ## trades.csv – colunas
 `horario_utc` (saída), `moeda`, `lado`, `entrada`, `saida` (preços já com slippage), `tamanho` (em moedas),

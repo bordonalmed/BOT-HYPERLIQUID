@@ -727,3 +727,221 @@ def test_otimizador_rompimento_e_ativacao(tmp_path):
     assert c["estrategia"] == "rompimento" and c["alvo_mult_stop"] is None
     ok, _ = ativar_config.desativar(destino)
     assert ok and not os.path.exists(destino)
+
+
+# ---------------- execucao na corretora (testnet/real) com corretora FALSA ----------------
+import execucao  # noqa: E402
+
+CONTA = "0x" + "a" * 40
+AGENTE = "0x" + "b" * 40
+
+
+def test_arredondamentos_hyperliquid():
+    assert execucao.arredondar_tamanho(0.123456, 3) == 0.123
+    assert execucao.arredondar_tamanho(1.9999, 0) == 1.0
+    assert execucao.arredondar_preco(77481.37, 5) == 77481.0
+    assert execucao.arredondar_preco(1.234567, 0) == 1.2346
+    assert execucao.arredondar_preco(0.0123456, 0) == 0.012346
+    assert execucao.arredondar_preco(123456.7, 5) == 123457.0
+
+
+def test_env_e_modos(tmp_path):
+    (tmp_path / ".env").write_text("# comentario\nMODO=testnet\nHL_ACCOUNT_ADDRESS=%s\nHL_SECRET_KEY='x'\n" % CONTA)
+    env = execucao.ler_env(str(tmp_path / ".env"))
+    assert env["MODO"] == "testnet" and env["HL_SECRET_KEY"] == "x"
+    assert execucao.modo_do_env(env) == "testnet"
+    assert execucao.modo_do_env({}) == "paper"
+    with pytest.raises(execucao.ErroExecucao):
+        execucao.modo_do_env({"MODO": "real"})               # falta CONFIRMO_DINHEIRO_REAL=SIM
+    assert execucao.modo_do_env({"MODO": "real", "CONFIRMO_DINHEIRO_REAL": "SIM"}) == "real"
+
+
+def test_recusa_chave_da_carteira_principal():
+    with pytest.raises(execucao.ErroExecucao):
+        execucao.validar_credenciais({"HL_ACCOUNT_ADDRESS": CONTA}, CONTA)
+    with pytest.raises(execucao.ErroExecucao):
+        execucao.validar_credenciais({"HL_ACCOUNT_ADDRESS": "abc"}, AGENTE)
+    assert execucao.validar_credenciais({"HL_ACCOUNT_ADDRESS": CONTA}, AGENTE) == CONTA
+
+
+class FakeInfo:
+    def __init__(self):
+        self.estado = {"marginSummary": {"accountValue": "50.0"}, "withdrawable": "50.0", "assetPositions": []}
+        self.ordens, self.fills = [], []
+
+    def meta(self):
+        return {"universe": [{"name": "BTC", "szDecimals": 5, "maxLeverage": 40},
+                             {"name": "ETH", "szDecimals": 4, "maxLeverage": 25}]}
+
+    def user_state(self, a):
+        return self.estado
+
+    def frontend_open_orders(self, a):
+        return self.ordens
+
+    def user_fills_by_time(self, a, t):
+        return [f for f in self.fills if f["time"] >= t]
+
+    def all_mids(self):
+        return {"BTC": "100.0"}
+
+
+class FakeExchange:
+    """Simula a corretora: executa a mercado no mid, guarda triggers como ordens abertas."""
+    def __init__(self, info, mid=100.0):
+        self.info, self.mid, self.oid, self.chamadas = info, mid, 100, []
+        self.recusar_trigger = False
+        self.agora = lambda: 0
+
+    def _ok(self, st):
+        return {"status": "ok", "response": {"type": "order", "data": {"statuses": [st]}}}
+
+    def update_leverage(self, lev, coin, is_cross):
+        self.chamadas.append(("lev", coin, lev, is_cross))
+        return {"status": "ok"}
+
+    def market_open(self, coin, is_buy, sz, px, slippage):
+        self.chamadas.append(("open", coin, is_buy, sz))
+        szi = sz if is_buy else -sz
+        self.info.estado["assetPositions"] = [{"position": {"coin": coin, "szi": str(szi), "entryPx": str(self.mid),
+                                                           "unrealizedPnl": "0"}}]
+        self.info.fills.append({"coin": coin, "px": str(self.mid), "sz": str(sz), "dir": "Open Long" if is_buy else "Open Short",
+                                "closedPnl": "0", "fee": "0.005", "time": self.agora()})
+        return self._ok({"filled": {"avgPx": str(self.mid), "totalSz": str(sz), "oid": 1}})
+
+    def order(self, coin, is_buy, sz, limit_px, order_type, reduce_only):
+        self.chamadas.append(("trigger", coin, is_buy, sz, limit_px, order_type, reduce_only))
+        if self.recusar_trigger:
+            return self._ok({"error": "trigger recusado"})
+        self.oid += 1
+        self.info.ordens.append({"coin": coin, "oid": self.oid})
+        return self._ok({"resting": {"oid": self.oid}})
+
+    def market_close(self, coin, sz, px, slippage):
+        self.chamadas.append(("close", coin))
+        if not self.info.estado["assetPositions"]:
+            return None
+        self.info.estado["assetPositions"] = []
+        return self._ok({"filled": {"avgPx": str(self.mid), "totalSz": "1", "oid": 9}})
+
+    def cancel(self, coin, oid):
+        self.info.ordens = [o for o in self.info.ordens if o["oid"] != oid]
+        return {"status": "ok"}
+
+    def simular_stop(self, coin, px, sz, closed_pnl, t):
+        """A corretora executou o stop sozinha (bot nem precisou estar ligado)."""
+        self.info.estado["assetPositions"] = []
+        self.info.fills.append({"coin": coin, "px": str(px), "sz": str(sz), "dir": "Close Long",
+                                "closedPnl": str(closed_pnl), "fee": "0.004", "time": t})
+
+
+def novo_executor():
+    info = FakeInfo()
+    exch = FakeExchange(info)
+    ex = execucao.ExecutorHyperliquid("testnet", {"HL_ACCOUNT_ADDRESS": CONTA}, info=info, exchange=exch,
+                                      endereco_agente=AGENTE)
+    return ex, info, exch
+
+
+def test_executor_protecoes_reduce_only_e_arredondadas():
+    ex, info, exch = novo_executor()
+    oid = ex.colocar_protecao("BTC", "long", 0.001, 97.123456, "sl")
+    _, coin, is_buy, sz, limite, otype, reduce_only = exch.chamadas[-1]
+    assert oid == 101 and reduce_only is True and is_buy is False          # stop de long = venda
+    assert otype["trigger"]["tpsl"] == "sl" and otype["trigger"]["isMarket"] is True
+    assert otype["trigger"]["triggerPx"] == 97.1                             # BTC: 6 - 5 = 1 casa decimal
+    exch.recusar_trigger = True
+    with pytest.raises(execucao.ErroExecucao):
+        ex.colocar_protecao("BTC", "long", 0.001, 97.0, "tp")
+
+
+def novo_livebot(tmp_path, cfg=None):
+    ex, info, exch = novo_executor()
+    api = FakeAPI()
+    rel = Relogio(T0 + 200 * IV)
+    c = cfg or dict(bot.CFG, alavancagem_max=4.0)
+    lb = bot.LiveBot(c, ex, "testnet", api=api, base_dir=str(tmp_path), now_fn=rel)
+    exch.agora = lambda: bot.agora_ms(rel)
+    api.mids = {"BTC": 100.0}
+    lb.mids = {"BTC": 100.0}
+    lb.conta_valor, lb.livre = ex.conta_valor()
+    lb.estado["dia"] = bot.dia_utc(bot.agora_ms(rel))
+    lb.estado["equity_inicio_dia"] = 50.0
+    return lb, ex, info, exch, api, rel
+
+
+def test_livebot_abre_com_stop_e_alvo_na_corretora(tmp_path):
+    lb, ex, info, exch, api, rel = novo_livebot(tmp_path)
+    assert lb.abrir("BTC", "long", 100.0, 1.0, bot.agora_ms(rel))
+    pos = lb.estado["posicoes"][0]
+    tipos = [c for c in exch.chamadas if c[0] == "trigger"]
+    assert [t[5]["trigger"]["tpsl"] for t in tipos] == ["sl", "tp"]
+    assert pos["oid_stop"] and pos["oid_alvo"]
+    assert ("lev", "BTC", 4, False) in exch.chamadas                       # 4x isolada
+    assert os.path.exists(tmp_path / "state_testnet.json")                  # arquivo separado do paper
+    assert not os.path.exists(tmp_path / "state.json")
+
+
+def test_livebot_fecha_se_protecao_falhar(tmp_path):
+    lb, ex, info, exch, api, rel = novo_livebot(tmp_path)
+    exch.recusar_trigger = True
+    assert not lb.abrir("BTC", "long", 100.0, 1.0, bot.agora_ms(rel))
+    assert ("close", "BTC") in exch.chamadas                                # nunca fica sem protecao
+    assert lb.estado["posicoes"][0]["motivo_saida"] == "sem_protecao"
+
+
+def test_livebot_registra_stop_executado_pela_corretora(tmp_path):
+    lb, ex, info, exch, api, rel = novo_livebot(tmp_path)
+    lb.abrir("BTC", "long", 100.0, 1.0, bot.agora_ms(rel))
+    pos = lb.estado["posicoes"][0]
+    rel.ms += 3600_000
+    exch.simular_stop("BTC", pos["stop"], pos["tamanho"], -0.74, bot.agora_ms(rel))
+    info.estado["marginSummary"]["accountValue"] = "49.25"
+    assert lb.ciclo()
+    assert lb.estado["posicoes"] == []
+    assert info.ordens == []                                                 # alvo que sobrou foi cancelado
+    t = list(csv.DictReader(open(tmp_path / "trades_testnet.csv")))[0]
+    assert t["motivo"] == "stop"
+    assert float(t["pnl_usd"]) == pytest.approx(-0.74 - 0.005 - 0.004)       # pnl real - taxas reais
+    assert float(t["capital_apos"]) == pytest.approx(49.25)
+
+
+def test_livebot_saida_por_tempo_e_kill_fechar(tmp_path):
+    lb, ex, info, exch, api, rel = novo_livebot(tmp_path)
+    lb.abrir("BTC", "long", 100.0, 1.0, bot.agora_ms(rel))
+    rel.ms += lb.cfg["tempo_max_min"] * 60_000
+    lb._gerir_posicoes(bot.agora_ms(rel))
+    assert ("close", "BTC") in exch.chamadas
+    info.fills.append({"coin": "BTC", "px": "100.5", "sz": "1", "dir": "Close Long", "closedPnl": "0.1",
+                       "fee": "0.004", "time": bot.agora_ms(rel)})
+    lb._sincronizar(bot.agora_ms(rel))
+    assert lb.estado["posicoes"] == []
+    assert list(csv.DictReader(open(tmp_path / "trades_testnet.csv")))[0]["motivo"] == "tempo"
+    # KILL_FECHAR: fecha tudo e para
+    lb.abrir("BTC", "long", 100.0, 1.0, bot.agora_ms(rel))
+    (tmp_path / "KILL_FECHAR").write_text("")
+    lb.ciclo()
+    assert lb.parar and not os.path.exists(tmp_path / "KILL_FECHAR")
+    assert exch.chamadas.count(("close", "BTC")) == 2
+
+
+def test_livebot_recoloca_protecao_e_avisa_posicao_desconhecida(tmp_path, caplog):
+    lb, ex, info, exch, api, rel = novo_livebot(tmp_path)
+    lb.abrir("BTC", "long", 100.0, 1.0, bot.agora_ms(rel))
+    info.ordens = []                                                         # alguem cancelou no site
+    info.estado["assetPositions"].append({"position": {"coin": "ETH", "szi": "0.5", "entryPx": "10"}})
+    lb._sincronizar(bot.agora_ms(rel))
+    assert len(info.ordens) == 2
+    assert "DESCONHECIDA" in caplog.text
+
+
+def test_livebot_respeita_teto_de_capital(tmp_path):
+    lb, ex, info, exch, api, rel = novo_livebot(tmp_path, dict(bot.CFG, capital_max_real=60.0))
+    lb.conta_valor = 1000.0
+    assert lb._capital_operacional() == 60.0
+
+
+def test_livebot_recusa_stop_movel():
+    ex, info, exch = novo_executor()
+    with pytest.raises(ValueError):
+        bot.LiveBot(dict(bot.CFG, trailing_atr_mult=3.0), ex, "testnet", api=FakeAPI(), base_dir=".")

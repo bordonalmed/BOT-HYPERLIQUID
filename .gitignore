@@ -22,3 +22,6 @@ cache_amplo_*.json
 otimizacao_rompimento_resultado.txt
 melhor_config_rompimento.json
 config_ativa.json
+state_*.json
+trades_*.csv
+KILL_FECHAR

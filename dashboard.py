@@ -25,6 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 import bot
+import execucao
 import report
 
 ONLINE_MAX_S = 120   # sem ciclo ha mais que isso => OFFLINE
@@ -54,11 +55,22 @@ def _tail(caminho, linhas=40, max_bytes=65536):
     return [l for l in dados.splitlines() if l.strip()][-linhas:]
 
 
-def coletar(base, cfg=bot.CFG, agora=None):
+def modo_e_cfg(base):
+    """Le o MODO do .env (paper/testnet/real) e aponta para os arquivos desse modo."""
+    modo = (execucao.ler_env(os.path.join(base, ".env")).get("MODO") or "paper").strip().lower()
+    if modo not in ("testnet", "real"):
+        return "paper", bot.CFG
+    return modo, dict(bot.CFG, arquivo_estado="state_%s.json" % modo, arquivo_trades="trades_%s.csv" % modo)
+
+
+def coletar(base, cfg=bot.CFG, agora=None, modo="paper"):
     agora = agora or time.time()
     agora_ms = int(agora * 1000)
     estado = _ler_json(os.path.join(base, cfg["arquivo_estado"])) or {}
     cap_ini = cfg["capital_inicial"]
+    ao_vivo = estado.get("modo") in ("testnet", "real")
+    if ao_vivo:
+        cap_ini = float(estado.get("capital_inicial_conta", cap_ini))
     capital = float(estado.get("capital", cap_ini))
 
     # ---------- posicoes abertas ----------
@@ -67,6 +79,8 @@ def coletar(base, cfg=bot.CFG, agora=None):
         mid = p.get("ultimo_mid") or p["entrada"]
         saida = bot.preco_execucao(mid, p["lado"], "saida", p.get("slip", cfg["slippage_por_lado"]))
         pnl, _ = bot.pnl_liquido(p["lado"], p["entrada"], saida, p["tamanho"], cfg["taxa_por_lado"])
+        if p.get("pnl_corretora") is not None:
+            pnl = p["pnl_corretora"]                      # valor real informado pela corretora
         posicoes.append({
             "moeda": p["moeda"], "lado": p["lado"], "entrada": p["entrada"], "atual": mid,
             "stop": p["stop"], "alvo": p["alvo"], "tamanho": p["tamanho"],
@@ -74,7 +88,8 @@ def coletar(base, cfg=bot.CFG, agora=None):
             "movel": bool(p.get("trailing")),
             "minutos": (agora_ms - p["entrada_ms"]) / 60000.0,
         })
-    equity = capital + sum(p["pnl"] for p in posicoes)
+    # ao vivo, o saldo da corretora ja inclui o resultado das posicoes abertas
+    equity = capital if ao_vivo else capital + sum(p["pnl"] for p in posicoes)
 
     # ---------- operacoes fechadas ----------
     trades = []
@@ -122,6 +137,7 @@ def coletar(base, cfg=bot.CFG, agora=None):
 
     return {
         "agora_ms": agora_ms,
+        "modo": estado.get("modo") or modo,
         "status": {
             "online": online, "ultimo_ciclo_ms": ultimo,
             "ultimo_ciclo_ok": estado.get("ultimo_ciclo_ok"),
@@ -263,7 +279,7 @@ footer{margin-top:18px;color:var(--dim);font-size:11px;text-align:center;letter-
   <header>
     <h1>NEON//DESK<small id="sub">HYPERLIQUID · PAPER TRADING</small></h1>
     <div class="badges">
-      <span class="badge sim">SIMULACAO · SEM DINHEIRO REAL</span>
+      <span class="badge sim" id="modo">SIMULACAO · SEM DINHEIRO REAL</span>
       <span id="st" class="badge off"><span class="dot"></span>CARREGANDO</span>
       <button id="btnCel" class="badge sim" style="display:none;cursor:pointer;background:transparent">CELULAR</button>
     </div>
@@ -429,7 +445,10 @@ function logs(d){
 }
 
 function render(d){
-  const s=d.status, st=$('st');
+  const s=d.status, st=$('st'), md=$('modo');
+  if(d.modo==='testnet'){md.textContent='TESTNET · DINHEIRO DE TESTE';md.className='badge paused'}
+  else if(d.modo==='real'){md.textContent='REAL · DINHEIRO DE VERDADE';md.className='badge off'}
+  else{md.textContent='SIMULACAO · SEM DINHEIRO REAL';md.className='badge sim'}
   $('sub').textContent='HYPERLIQUID · PAPER TRADING · '+d.estrategia;
   if(s.pausado){st.className='badge paused';st.innerHTML='<span class="dot"></span>PAUSADO'}
   else if(s.online){st.className='badge on';st.innerHTML='<span class="dot"></span>BOT ONLINE'}
@@ -504,7 +523,8 @@ def criar_handler(base, chave=None, url_celular=None):
                 return
             if partes.path == "/api/dados":
                 try:
-                    dados = coletar(base)
+                    modo, cfg = modo_e_cfg(base)
+                    dados = coletar(base, cfg, modo=modo)
                     if self._local() and url_celular:
                         dados["url_celular"] = url_celular
                     self._enviar(json.dumps(dados), "application/json")
