@@ -17,8 +17,10 @@ def main():
         mids = bot.parse_mids(api.all_mids())
         moeda = u[0][0] if u else "BTC"
         print(f"Precos recebidos: {len(mids)} | {moeda} = {mids.get(moeda)}")
-        cs = bot.parse_candles(api.candles(moeda, "15m", agora - 200 * bot.CFG["intervalo_ms"], agora), agora)
-        print(f"Candles 15m fechados de {moeda}: {len(cs)} | ultimo: {cs[-1] if cs else None}")
+        iv = bot.CFG["intervalo"]
+        inicio = agora - bot.CFG["candles_historico"] * bot.CFG["intervalo_ms"]
+        cs = bot.parse_candles(api.candles(moeda, iv, inicio, agora), agora)
+        print(f"Candles {iv} fechados de {moeda}: {len(cs)} | ultimo: {cs[-1] if cs else None}")
         s = bot.avaliar_sinal(cs)
         print(f"Sinal atual de {moeda}: {s['lado'] if s else 'nenhum'}")
         print("OK: conexao e parse funcionando.")
