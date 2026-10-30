@@ -30,6 +30,7 @@ Não envia ordens, não assina nada, não usa carteira, seed, chave privada nem 
 | `6_parar_bot.bat` | Cria o arquivo KILL: o bot salva o estado e encerra. |
 | `7_rodar_testes.bat` | Roda os testes automáticos (precisa do passo 1). |
 | `8_dashboard.bat` | Abre o painel visual no navegador (http://localhost:8050). Atualiza a cada 5 s. |
+| `9_dashboard_celular.bat` | Igual ao 8, mas libera o acesso pelo celular no mesmo Wi-Fi. Clique em CELULAR no painel e leia o QR Code. O link tem uma chave de acesso (arquivo `dashboard_chave.txt`); sem ela, outro aparelho recebe acesso negado. Apague esse arquivo para gerar uma chave nova. |
 
 - Configure o Windows para **não suspender** quando estiver na tomada: Configurações → Sistema → Energia → Suspensão = Nunca.
 - Se o notebook dormir ou desligar, o bot para e, ao ligar de novo pelo `3_iniciar_bot.bat`, ele continua de onde parou (`state.json`).

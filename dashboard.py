@@ -4,18 +4,25 @@ Dashboard local do bot de paper trading (somente leitura).
 
 Abre em http://localhost:8050 e le state.json, trades.csv e bot.log da pasta.
 Nao envia nada para fora do computador e nao mexe no bot.
-Uso: python dashboard.py [--porta 8050] [--dir PASTA] [--sem-navegador]
+Uso: python dashboard.py [--porta 8050] [--dir PASTA] [--sem-navegador] [--rede]
+
+--rede: libera o acesso pelo celular na mesma rede Wi-Fi. Quem acessa de outro
+aparelho precisa da chave de acesso (fica em dashboard_chave.txt e vai no link/QR).
 """
 
 import argparse
+import hmac
 import json
 import os
+import secrets
+import socket
 import sys
 import threading
 import time
 import webbrowser
 from collections import defaultdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 
 import bot
 import report
@@ -177,6 +184,7 @@ body{min-height:100vh;
     var(--bg);}
 body:after{content:"";position:fixed;inset:0;pointer-events:none;z-index:50;
   background:repeating-linear-gradient(0deg,rgba(0,0,0,.18) 0 1px,transparent 1px 3px);mix-blend-mode:multiply}
+body.noscan:after{display:none}
 .wrap{max-width:1500px;margin:0 auto;padding:20px 16px 40px}
 header{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;margin-bottom:18px}
 h1{font-family:var(--disp);font-weight:900;font-size:clamp(22px,4vw,38px);margin:0;letter-spacing:.08em;
@@ -252,9 +260,21 @@ footer{margin-top:18px;color:var(--dim);font-size:11px;text-align:center;letter-
     <div class="badges">
       <span class="badge sim">SIMULACAO · SEM DINHEIRO REAL</span>
       <span id="st" class="badge off"><span class="dot"></span>CARREGANDO</span>
+      <button id="btnCel" class="badge sim" style="display:none;cursor:pointer;background:transparent">CELULAR</button>
     </div>
   </header>
   <div class="meta" id="meta" style="margin:-8px 0 14px"></div>
+  <div id="celCard" class="panel m" style="display:none;margin-bottom:14px">
+    <h2>Abrir no celular</h2>
+    <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center">
+      <div id="qr" style="background:#fff;padding:10px;line-height:0"></div>
+      <div style="min-width:0;flex:1">
+        <div class="meta">Celular no MESMO Wi-Fi do notebook. Aponte a camera para o QR Code ou digite:</div>
+        <div id="celUrl" style="color:var(--cyan);font-size:15px;margin:8px 0;word-break:break-all"></div>
+        <div class="meta">O link contem a chave de acesso. Nao compartilhe.</div>
+      </div>
+    </div>
+  </div>
 
   <section class="grid kpis" id="kpis"></section>
 
@@ -403,8 +423,23 @@ function render(d){
   $('universo').innerHTML=universo(d); logs(d);
 }
 
+let qrFeito=false;
+function celular(d){
+  if(!d.url_celular) return;
+  const b=$('btnCel'); b.style.display='';
+  if(!b.onclick) b.onclick=()=>{const c=$('celCard'),abrir=c.style.display==='none';c.style.display=abrir?'':'none';document.body.classList.toggle('noscan',abrir);desenhaQR(d.url_celular)};
+  $('celUrl').textContent=d.url_celular;
+}
+function desenhaQR(url){
+  if(qrFeito) return; qrFeito=true;
+  const img=new Image(); img.width=200; img.height=200; img.alt='QR Code';
+  img.onerror=()=>{$('qr').outerHTML='<div class="meta" style="max-width:220px">QR indisponivel: rode 1_instalar.bat de novo. Use o link ao lado.</div>'};
+  img.src='/qr.svg'; $('qr').appendChild(img);
+}
 async function tick(){
-  try{const r=await fetch('/api/dados',{cache:'no-store'});render(await r.json())}
+  try{const r=await fetch('/api/dados'+location.search,{cache:'no-store'});
+    if(r.status===403){const st=$('st');st.className='badge off';st.innerHTML='<span class="dot"></span>CHAVE DE ACESSO INVALIDA';return}
+    const d=await r.json();render(d);celular(d)}
   catch(e){const st=$('st');st.className='badge off';st.innerHTML='<span class="dot"></span>DASHBOARD SEM CONEXAO'}
 }
 tick(); setInterval(tick,5000);
@@ -414,8 +449,19 @@ tick(); setInterval(tick,5000);
 """
 
 
-def criar_handler(base):
+def criar_handler(base, chave=None, url_celular=None):
     class Handler(BaseHTTPRequestHandler):
+        def _local(self):
+            return self.client_address[0] in ("127.0.0.1", "::1")
+
+        def _autorizado(self, query):
+            if self._local():
+                return True
+            if not chave:
+                return False
+            k = parse_qs(query).get("k", [""])[0]
+            return hmac.compare_digest(k.encode(), chave.encode())
+
         def _enviar(self, corpo, tipo):
             dados = corpo.encode("utf-8")
             self.send_response(200)
@@ -426,12 +472,28 @@ def criar_handler(base):
             self.wfile.write(dados)
 
         def do_GET(self):
-            if self.path.startswith("/api/dados"):
+            partes = urlsplit(self.path)
+            if not self._autorizado(partes.query):
+                self.send_error(403, "Chave de acesso invalida")
+                return
+            if partes.path == "/api/dados":
                 try:
-                    self._enviar(json.dumps(coletar(base)), "application/json")
+                    dados = coletar(base)
+                    if self._local() and url_celular:
+                        dados["url_celular"] = url_celular
+                    self._enviar(json.dumps(dados), "application/json")
                 except Exception as e:
                     self.send_error(500, str(e))
-            elif self.path in ("/", "/index.html"):
+            elif partes.path == "/qr.svg" and self._local() and url_celular:
+                try:
+                    import io
+                    import segno
+                    buf = io.BytesIO()
+                    segno.make(url_celular, error="m").save(buf, kind="svg", scale=6, border=2)
+                    self._enviar(buf.getvalue().decode("utf-8"), "image/svg+xml")
+                except Exception as e:
+                    self.send_error(500, "QR indisponivel: %s" % e)
+            elif partes.path in ("/", "/index.html"):
                 self._enviar(HTML, "text/html; charset=utf-8")
             else:
                 self.send_error(404)
@@ -442,14 +504,46 @@ def criar_handler(base):
     return Handler
 
 
+def ip_local():
+    """IP do notebook na rede Wi-Fi (nenhum pacote e enviado)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("10.255.255.255", 1))
+        return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
+def obter_chave(base):
+    caminho = os.path.join(base, "dashboard_chave.txt")
+    if os.path.exists(caminho):
+        with open(caminho) as f:
+            chave = f.read().strip()
+        if chave:
+            return chave
+    chave = secrets.token_urlsafe(9)
+    with open(caminho, "w") as f:
+        f.write(chave)
+    return chave
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--porta", type=int, default=8050)
     ap.add_argument("--dir", default=os.path.dirname(os.path.abspath(__file__)))
     ap.add_argument("--sem-navegador", action="store_true")
+    ap.add_argument("--rede", action="store_true", help="libera acesso pelo celular no mesmo Wi-Fi")
     a = ap.parse_args()
+    chave = url_celular = None
+    host = "127.0.0.1"
+    if a.rede:
+        host = "0.0.0.0"
+        chave = obter_chave(a.dir)
+        url_celular = "http://%s:%d/?k=%s" % (ip_local(), a.porta, chave)
     try:
-        srv = ThreadingHTTPServer(("127.0.0.1", a.porta), criar_handler(a.dir))
+        srv = ThreadingHTTPServer((host, a.porta), criar_handler(a.dir, chave, url_celular))
     except OSError:
         print("A porta %d ja esta em uso. O dashboard provavelmente ja esta aberto: http://localhost:%d"
               % (a.porta, a.porta))
@@ -458,6 +552,11 @@ def main():
         sys.exit(1)
     url = "http://localhost:%d" % a.porta
     print("Dashboard rodando em %s  (feche esta janela para desligar o dashboard; o bot continua)" % url)
+    if url_celular:
+        print("")
+        print("CELULAR (mesmo Wi-Fi): %s" % url_celular)
+        print("No notebook, clique no botao CELULAR do painel para ver o QR Code.")
+        print("Se o Windows perguntar sobre o Firewall, marque 'Redes privadas' e clique em Permitir.")
     if not a.sem_navegador:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     try:

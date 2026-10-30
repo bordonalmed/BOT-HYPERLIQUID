@@ -12,3 +12,4 @@ __pycache__/
 *.key
 *.pem
 bot.lock
+dashboard_chave.txt

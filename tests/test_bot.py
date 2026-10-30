@@ -1,5 +1,6 @@
 """Testes rapidos com dados sinteticos (sem rede)."""
 import csv
+import json
 import os
 import sys
 
@@ -365,3 +366,28 @@ def test_dashboard_coletar(tmp_path):
     assert len(d["posicoes"]) == 1 and d["posicoes"][0]["pnl"] > 0
     assert d["status"]["online"] is True
     assert d["equity"] == pytest.approx(d["capital"] + d["posicoes"][0]["pnl"])
+
+
+def test_dashboard_chave_de_acesso(tmp_path):
+    import dashboard
+    import threading
+    import urllib.request
+    import urllib.error
+    from http.server import ThreadingHTTPServer
+    H = dashboard.criar_handler(str(tmp_path), "segredo123", "http://x/?k=segredo123")
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    porta = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        # local (127.0.0.1) sempre liberado e recebe o link do celular
+        d = json.loads(urllib.request.urlopen("http://127.0.0.1:%d/api/dados" % porta).read())
+        assert d["url_celular"].endswith("segredo123")
+        # simula acesso de outro aparelho
+        H._local = lambda self: False
+        with pytest.raises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen("http://127.0.0.1:%d/api/dados?k=errada" % porta)
+        assert e.value.code == 403
+        d = json.loads(urllib.request.urlopen("http://127.0.0.1:%d/api/dados?k=segredo123" % porta).read())
+        assert "url_celular" not in d
+    finally:
+        srv.shutdown()
