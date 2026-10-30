@@ -142,6 +142,7 @@ def coletar(base, cfg=bot.CFG, agora=None):
         },
         "max_posicoes": cfg["max_posicoes"],
         "tempo_max_min": cfg["tempo_max_min"],
+        "estrategia": "%s TREND" % cfg["intervalo"].upper(),
         "posicoes": posicoes,
         "universo": estado.get("universo", []),
         "curva": curva,
@@ -256,7 +257,7 @@ footer{margin-top:18px;color:var(--dim);font-size:11px;text-align:center;letter-
 <body>
 <div class="wrap">
   <header>
-    <h1>NEON//DESK<small>HYPERLIQUID · PAPER TRADING · 15M TREND</small></h1>
+    <h1>NEON//DESK<small id="sub">HYPERLIQUID · PAPER TRADING</small></h1>
     <div class="badges">
       <span class="badge sim">SIMULACAO · SEM DINHEIRO REAL</span>
       <span id="st" class="badge off"><span class="dot"></span>CARREGANDO</span>
@@ -305,6 +306,7 @@ const usd=(v,s)=>v==null?'—':(s&&v>0?'+':'')+(v<0?'-':'')+'US$ '+Math.abs(v).t
 const pct=(v,s)=>v==null?'—':(s&&v>0?'+':'')+v.toFixed(2)+'%';
 const cls=v=>v>0?'pos':v<0?'neg':'';
 const px=v=>{if(v==null)return'—';const a=Math.abs(v);return v.toFixed(a>=1000?1:a>=10?3:a>=1?4:6)};
+const dur=m=>m>=1440?(m/1440).toFixed(1)+'d':m>=60?(m/60).toFixed(1)+'h':Math.floor(m)+'min';
 const esc=s=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 
 function kpi(lbl,val,sub,c,bar,risk){
@@ -360,7 +362,7 @@ function posicoes(d){
   return '<div class="tbl"><table><tr><th>Moeda</th><th>Lado</th><th>Entrada</th><th>Atual</th><th>Stop</th><th>Alvo</th><th>Nocional</th><th>PnL</th><th>Tempo</th></tr>'+
   d.posicoes.map(p=>`<tr><td><b>${esc(p.moeda)}</b></td><td><span class="tag ${p.lado}">${p.lado.toUpperCase()}</span></td>
    <td>${px(p.entrada)}</td><td>${px(p.atual)}</td><td class="neg">${px(p.stop)}</td><td class="pos">${px(p.alvo)}</td>
-   <td>${usd(p.nocional)}</td><td class="${cls(p.pnl)}">${usd(p.pnl,1)}</td><td>${Math.floor(p.minutos)}/${d.tempo_max_min} min</td></tr>`).join('')+'</table></div>';
+   <td>${usd(p.nocional)}</td><td class="${cls(p.pnl)}">${usd(p.pnl,1)}</td><td>${dur(p.minutos)} / ${dur(d.tempo_max_min)}</td></tr>`).join('')+'</table></div>';
 }
 
 function dia(d){
@@ -405,6 +407,7 @@ function logs(d){
 
 function render(d){
   const s=d.status, st=$('st');
+  $('sub').textContent='HYPERLIQUID · PAPER TRADING · '+d.estrategia;
   if(s.pausado){st.className='badge paused';st.innerHTML='<span class="dot"></span>PAUSADO'}
   else if(s.online){st.className='badge on';st.innerHTML='<span class="dot"></span>BOT ONLINE'}
   else{st.className='badge off';st.innerHTML='<span class="dot"></span>BOT OFFLINE'}

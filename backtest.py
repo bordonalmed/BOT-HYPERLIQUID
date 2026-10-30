@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Backtest da mesma estrategia do bot sobre o historico de candles 15m da Hyperliquid
-(a API publica guarda ~5000 candles por moeda = ~52 dias).
+Backtest da mesma estrategia do bot (bot.CFG) sobre o historico da Hyperliquid
+(a API publica guarda ~5000 candles por moeda: ~52 dias em 15m, ~833 dias em 4h).
 
 Somente leitura de dados publicos. Nao mexe no bot, no state.json nem no trades.csv.
 Resultado: backtest_trades.csv (mesmo formato do trades.csv) + relatorio na tela.
@@ -9,11 +9,11 @@ Resultado: backtest_trades.csv (mesmo formato do trades.csv) + relatorio na tela
 Uso: python backtest.py [--dias 50] [--saida backtest_trades.csv]
 
 Regras da simulacao (mesmas do bot, com as adaptacoes necessarias para candles):
-- Sinal avaliado no fechamento do candle (janela de 200 candles, igual ao bot);
+- Sinal avaliado no fechamento do candle (mesma janela de candles do bot);
   a entrada acontece na ABERTURA do candle seguinte, com slippage.
 - Stop/alvo checados pela maxima e minima de cada candle. Se o candle tocar stop
   e alvo, conta como STOP (conservador). Se abrir alem do stop, sai na abertura.
-- Saida por tempo no fechamento do candle em que completar 240 min.
+- Saida por tempo no fechamento do candle em que completar o tempo maximo.
 - Limite diario checado no fechamento de cada candle (equity com posicoes abertas).
 - Taxas, slippage, 2 posicoes, 8 operacoes/dia, risco 1,5%, alavancagem 2x: iguais ao bot.
 """
@@ -184,19 +184,22 @@ def simular(dados, cfg=bot.CFG, saida_csv=None, sinal_fn=None, t_inicio=None, t_
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dias", type=int, default=50, help="dias de historico (max ~52 em 15m)")
+    ap.add_argument("--dias", type=int, default=None,
+                    help="dias de historico (padrao: o maximo que a API guarda, ~5000 candles)")
     ap.add_argument("--saida", default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                                     "backtest_trades.csv"))
     a = ap.parse_args()
     cfg = dict(bot.CFG)
+    if a.dias is None:
+        a.dias = int(4990 * cfg["intervalo_ms"] / 86_400_000)
     print("BACKTEST (simulacao sobre historico, sem dinheiro real)")
-    print("Baixando %d dias de candles 15m..." % a.dias)
+    print("Baixando %d dias de candles %s..." % (a.dias, cfg["intervalo"]))
     try:
         dados = baixar(cfg, a.dias)
     except Exception as e:
         print("FALHA ao baixar dados: %s" % e)
         sys.exit(1)
-    dados = {m: cs for m, cs in dados.items() if len(cs) > cfg["ema_lenta"] + 10}
+    dados = {m: cs for m, cs in dados.items() if len(cs) > max(cfg["ema_lenta"], cfg.get("filtro_ema") or 0) + 10}
     if not dados:
         print("Sem dados suficientes.")
         sys.exit(1)

@@ -10,7 +10,25 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import bot  # noqa: E402
 import report  # noqa: E402
 
-IV = bot.CFG["intervalo_ms"]
+# Os testes de logica usam os parametros originais de 15m (numeros faceis de conferir).
+# A configuracao aprovada (4h) tem testes proprios no final do arquivo.
+LEGADO = {"intervalo": "15m", "intervalo_ms": 15 * 60 * 1000, "candles_historico": 200,
+          "filtro_ema": None, "rsi_long": (52, 68), "rsi_short": (32, 48),
+          "stop_atr_mult": 1.5, "alvo_mult_stop": 1.5, "tempo_max_min": 240,
+          "max_trades_dia": 8}
+CFG_APROVADA = dict(bot.CFG)
+
+
+@pytest.fixture(autouse=True)
+def cfg_legado():
+    original = dict(bot.CFG)
+    bot.CFG.update(LEGADO)
+    yield
+    bot.CFG.clear()
+    bot.CFG.update(original)
+
+
+IV = LEGADO["intervalo_ms"]
 T0 = 1_760_000_400_000 - (1_760_000_400_000 % IV)  # alinhado ao candle de 15m
 
 
@@ -470,3 +488,58 @@ def test_simular_respeita_periodo():
     corte = cs[300]["t"]
     trades = backtest.simular({"AAA": cs}, bot.CFG, t_fim=corte)
     assert all(t["horario_utc"] <= bot.iso_utc(corte + IV) for t in trades)
+
+
+# ---------------- configuracao aprovada (4h) ----------------
+def test_config_aprovada_valores():
+    c = CFG_APROVADA
+    assert c["intervalo"] == "4h" and c["stop_atr_mult"] == 3.0 and c["alvo_mult_stop"] == 3.0
+    assert c["filtro_ema"] == 200 and c["max_trades_dia"] == 3 and c["tempo_max_min"] == 48 * 240
+    assert c["candles_historico"] >= 260
+
+
+def test_filtro_ema200_bloqueia_contra_tendencia():
+    cfg = dict(CFG_APROVADA, rsi_long=(52, 68))
+    # longa queda seguida de repique: EMA20 > EMA50 no curto prazo, mas preco abaixo da EMA200
+    queda = gerar_candles(300, inicio=400.0, sobe=-1.0, desce=-0.6)
+    repique = gerar_candles(60, inicio=queda[-1]["c"], t0=queda[-1]["t"] + IV)
+    cs = queda + repique
+    sem = bot.avaliar_sinal(cs, dict(cfg, filtro_ema=None))
+    com = bot.avaliar_sinal(cs, cfg)
+    assert sem is not None and sem["lado"] == "long"
+    assert com is None
+    # tendencia de alta longa: filtro deixa passar
+    alta = bot.avaliar_sinal(gerar_candles(320), cfg)
+    assert alta is not None and alta["lado"] == "long"
+
+
+def test_conferencia_apos_pausa_fecha_no_stop(tmp_path):
+    b, api, rel = novo_bot(tmp_path)
+    pos = abrir_long(b, api)                       # stop 98.53, alvo 102.28
+    t_ini = bot.agora_ms(rel)
+    rel.ms += 60 * 60_000                          # notebook "dormiu" 1 hora
+    # nesse periodo o preco caiu ate 98 (stop) e voltou para 101
+    cs = [{"t": t_ini + i * 300_000, "T": t_ini + (i + 1) * 300_000 - 1, "o": 100.0,
+           "h": 100.5, "l": 99.5, "c": 100.0, "v": 1.0} for i in range(12)]
+    cs[5].update(l=98.0)
+    api.candles_por_moeda = {"BTC": cs}
+    b.mids = {"BTC": 101.0}
+    b._gerir_posicoes(bot.agora_ms(rel))
+    assert b.estado["posicoes"] == []
+    t = ler_trades(tmp_path)[0]
+    assert t["motivo"] == "stop"
+    assert float(t["saida"]) == pytest.approx(pos["stop"] * 0.9997)
+
+
+def test_conferencia_sem_toque_mantem_posicao(tmp_path):
+    b, api, rel = novo_bot(tmp_path)
+    abrir_long(b, api)
+    t_ini = bot.agora_ms(rel)
+    rel.ms += 30 * 60_000
+    api.candles_por_moeda = {"BTC": [{"t": t_ini + i * 300_000, "T": t_ini + (i + 1) * 300_000 - 1,
+                                      "o": 100.0, "h": 101.0, "l": 99.0, "c": 100.0, "v": 1.0}
+                                     for i in range(6)]}
+    b.mids = {"BTC": 100.5}
+    b._gerir_posicoes(bot.agora_ms(rel))
+    assert len(b.estado["posicoes"]) == 1
+    assert b.estado["posicoes"][0]["conferido_ms"] == bot.agora_ms(rel)

@@ -31,32 +31,35 @@ CFG = {
     "top_n": 10,
     "volume_minimo_usd": 20_000_000,
     "atualizar_universo_s": 3600,
-    # estrategia
-    "intervalo": "15m",
-    "intervalo_ms": 15 * 60 * 1000,
-    "candles_historico": 200,
+    # estrategia (configuracao APROVADA pelo otimizador: 4h, stop 3xATR, alvo 3x,
+    # filtro EMA200, RSI larga, max 3 ops/dia, saida apos 48 candles)
+    "intervalo": "4h",
+    "intervalo_ms": 4 * 60 * 60 * 1000,
+    "candles_historico": 400,         # precisa de >= 260 para a EMA200
     "ema_rapida": 20,
     "ema_lenta": 50,
     "rsi_periodo": 14,
     "atr_periodo": 14,
     "lateral_min_pct": 0.001,         # |EMA20-EMA50|/preco < 0,1% => lateral
-    "rsi_long": (52, 68),
-    "rsi_short": (32, 48),
+    "filtro_ema": 200,                # so LONG acima e SHORT abaixo desta EMA (None desliga)
+    "rsi_long": (50, 72),
+    "rsi_short": (28, 50),
     "candles_volume_prioridade": 20,
     # risco
     "capital_inicial": 50.0,
     "risco_por_trade": 0.015,
-    "stop_atr_mult": 1.5,
-    "alvo_mult_stop": 1.5,
-    "tempo_max_min": 240,
+    "stop_atr_mult": 3.0,
+    "alvo_mult_stop": 3.0,
+    "tempo_max_min": 48 * 240,        # 48 candles de 4h = 8 dias
     "alavancagem_max": 2.0,
     "nocional_minimo": 10.0,
     "max_posicoes": 2,
-    "max_trades_dia": 8,
+    "max_trades_dia": 3,
     "perda_diaria_max": 0.05,
     "taxa_por_lado": 0.00045,
     "slippage_por_lado": 0.0003,
     # operacao
+    "intervalo_conferencia": "5m",    # candles usados para conferir stop/alvo apos o bot ficar parado
     "loop_s": 30,
     "heartbeat_ciclos": 20,           # loga um resumo a cada N ciclos (~10 min)
     "arquivo_estado": "state.json",
@@ -169,14 +172,19 @@ def avaliar_sinal(candles, cfg=CFG):
     preco = closes[-1]
     if None in (e_r, e_l, r, a) or preco <= 0 or a <= 0:
         return None
-    info = {"ema20": e_r, "ema50": e_l, "rsi": r, "atr": a, "close": preco}
+    e_f = None
+    if cfg.get("filtro_ema"):
+        e_f = ema(closes, cfg["filtro_ema"])[-1]
+        if e_f is None:
+            return None
+    info = {"ema20": e_r, "ema50": e_l, "rsi": r, "atr": a, "close": preco, "ema_filtro": e_f}
     if abs(e_r - e_l) / preco < cfg["lateral_min_pct"]:
         return None
     lo, hi = cfg["rsi_long"]
-    if e_r > e_l and preco > e_r and lo <= r <= hi:
+    if e_r > e_l and preco > e_r and lo <= r <= hi and (e_f is None or preco > e_f):
         return dict(info, lado="long")
     lo, hi = cfg["rsi_short"]
-    if e_r < e_l and preco < e_r and lo <= r <= hi:
+    if e_r < e_l and preco < e_r and lo <= r <= hi and (e_f is None or preco < e_f):
         return dict(info, lado="short")
     return None
 
@@ -213,6 +221,22 @@ def pnl_liquido(lado, entrada, saida, tamanho, taxa):
     bruto = (saida - entrada) * tamanho if lado == "long" else (entrada - saida) * tamanho
     taxas = (entrada * tamanho + saida * tamanho) * taxa
     return bruto - taxas, taxas
+
+
+def verificar_saida_candle(pos, c):
+    """Confere um candle (maxima/minima). Se tocar stop e alvo no mesmo candle,
+    conta STOP (conservador, igual ao backtest). Retorna (motivo, preco) ou None."""
+    if pos["lado"] == "long":
+        if c["l"] <= pos["stop"]:
+            return "stop", min(c["o"], pos["stop"])
+        if c["h"] >= pos["alvo"]:
+            return "alvo", pos["alvo"]
+    else:
+        if c["h"] >= pos["stop"]:
+            return "stop", max(c["o"], pos["stop"])
+        if c["l"] <= pos["alvo"]:
+            return "alvo", pos["alvo"]
+    return None
 
 
 def verificar_saida(pos, mid, now_ms, cfg=CFG):
@@ -401,7 +425,8 @@ class PaperBot:
         else:
             stop, alvo = entrada + dist, entrada - cfg["alvo_mult_stop"] * dist
         pos = {"moeda": moeda, "lado": lado, "entrada": entrada, "tamanho": tamanho,
-               "stop": stop, "alvo": alvo, "entrada_ms": now_ms, "ultimo_mid": mid}
+               "stop": stop, "alvo": alvo, "entrada_ms": now_ms, "ultimo_mid": mid,
+               "conferido_ms": now_ms}
         self.estado["posicoes"].append(pos)
         self.estado["trades_hoje"] += 1
         log.info("ABRIU %s %s | entrada %.6g | tamanho %.6g | nocional US$ %.2f | stop %.6g | alvo %.6g",
@@ -450,8 +475,36 @@ class PaperBot:
         except Exception as e:
             log.error("Erro ao atualizar universo: %s (mantendo lista anterior)", e)
 
+    def _conferir_periodo_parado(self, pos, now_ms):
+        """Se o bot ficou parado (notebook dormindo etc.), confere nos candles de 5m
+        se stop ou alvo foram tocados nesse intervalo. Retorna True se fechou."""
+        desde = pos.get("conferido_ms", pos["entrada_ms"])
+        if now_ms - desde < 3 * 60_000:
+            return False
+        try:
+            cs = parse_candles(self.api.candles(pos["moeda"], self.cfg["intervalo_conferencia"],
+                                                desde, now_ms), now_ms)
+        except Exception as e:
+            log.error("Erro ao conferir candles de %s apos pausa: %s (usando so o preco atual)",
+                      pos["moeda"], e)
+            return False
+        for c in cs:
+            if c["T"] < desde:
+                continue
+            saida = verificar_saida_candle(pos, c)
+            if saida:
+                log.info("CONFERENCIA %s: %s tocado as %s UTC enquanto o bot estava parado",
+                         pos["moeda"], saida[0], iso_utc(c["T"]))
+                self.fechar(pos, saida[1], saida[0], c["T"])
+                return True
+        if cs:
+            pos["conferido_ms"] = cs[-1]["T"] + 1
+        return False
+
     def _gerir_posicoes(self, now_ms):
         for pos in list(self.estado["posicoes"]):
+            if self._conferir_periodo_parado(pos, now_ms):
+                continue
             mid = self.mids.get(pos["moeda"])
             if mid is None:
                 continue
@@ -459,6 +512,8 @@ class PaperBot:
             saida = verificar_saida(pos, mid, now_ms, self.cfg)
             if saida:
                 self.fechar(pos, saida[1], saida[0], now_ms)
+            else:
+                pos["conferido_ms"] = now_ms
 
     def _checar_limite_diario(self, now_ms):
         if self.estado["pausado"] or self.estado["equity_inicio_dia"] is None:

@@ -33,6 +33,7 @@ Não envia ordens, não assina nada, não usa carteira, seed, chave privada nem 
 | `8_dashboard.bat` | Abre o painel visual no navegador (http://localhost:8050). Atualiza a cada 5 s. |
 | `10_backtest.bat` | Roda a mesma estratégia sobre ~50 dias de histórico real em poucos minutos. Salva `backtest_resultado.txt` e `backtest_trades.csv`. Não mexe no bot ao vivo. |
 | `11_otimizar.bat` | Testa centenas de variações (15m/1h/4h, stop, alvo, filtro EMA200, RSI, limites) nos primeiros 60% do histórico e valida a melhor nos últimos 40%. Salva `otimizacao_resultado.txt` e `melhor_config.json`. |
+| `12_zerar_paper.bat` | Arquiva `state.json`, `trades.csv` e `bot.log` numa pasta `arquivo_DATA` e recomeça o paper com US$ 50 (pare o bot antes). |
 | `9_dashboard_celular.bat` | Igual ao 8, mas libera o acesso pelo celular no mesmo Wi-Fi. Clique em CELULAR no painel e leia o QR Code. O link tem uma chave de acesso (arquivo `dashboard_chave.txt`); sem ela, outro aparelho recebe acesso negado. Apague esse arquivo para gerar uma chave nova. |
 
 - Configure o Windows para **não suspender** quando estiver na tomada: Configurações → Sistema → Energia → Suspensão = Nunca.
@@ -87,13 +88,15 @@ se **ainda não há dados suficientes**.
 ## Como o bot funciona
 - **Universo:** as 10 moedas de maior volume em 24 h, com volume mínimo de US$ 20 M e excluindo as deslistadas. Atualizado a cada 1 h.
 - **Loop de 30 s:** atualiza preços (`allMids`) → checa stop/alvo/tempo → checa o limite diário → procura entradas.
-- **Sinal (15m, só candles fechados, uma avaliação por candle novo):**
+- **Estratégia atual (aprovada pelo `otimizar.py` em validação fora da amostra):** gráfico de **4h**, só candles fechados, uma avaliação por candle novo.
   - Lateral (|EMA20 − EMA50| / preço < 0,1%): não opera.
-  - LONG: EMA20 > EMA50, fechamento > EMA20 e RSI14 entre 52 e 68.
-  - SHORT: EMA20 < EMA50, fechamento < EMA20 e RSI14 entre 32 e 48.
+  - LONG: EMA20 > EMA50, fechamento > EMA20, **fechamento > EMA200** e RSI14 entre 50 e 72.
+  - SHORT: EMA20 < EMA50, fechamento < EMA20, **fechamento < EMA200** e RSI14 entre 28 e 50.
   - Vários sinais ao mesmo tempo: entra primeiro na moeda com maior volume em USD nos últimos 20 candles.
-- **Risco:** 1,5% do capital por trade; stop = 1,5 × ATR14 (Wilder); alvo = 1,5 × a distância do stop; saída por tempo após 240 min;
-  nocional máximo de 2× o capital; ordens abaixo de US$ 10 de nocional são ignoradas; máximo de 2 posições e 8 operações por dia.
+  - Todos os parâmetros ficam no `CFG` do `bot.py`.
+- **Risco:** 1,5% do capital por trade; stop = 3 × ATR14 (Wilder); alvo = 3 × a distância do stop; saída por tempo após 48 candles (8 dias);
+  nocional máximo de 2× o capital; ordens abaixo de US$ 10 de nocional são ignoradas; máximo de 2 posições e 3 operações por dia.
+- **Bot parado (notebook dormindo):** ao voltar, o bot confere nos candles de 5m se o stop ou o alvo foram tocados no período e fecha a posição no preço correspondente.
 - **Limite diário:** se o capital + o PnL das posições abertas (já com custos) cair 5% em relação ao início do dia UTC, o bot fecha tudo e pausa até o próximo dia UTC.
 - **Custos:** taxa de 0,045% por lado + slippage de 0,03% por lado, sempre contra você.
 
