@@ -1037,3 +1037,30 @@ def test_posicao_sem_protecao_bloqueia_moeda(tmp_path, caplog):
     assert lb.estado["posicoes"] == [] and "BTC" in lb.bloqueadas
     assert "DESCONHECIDA" in caplog.text
     assert not lb.abrir("BTC", "short", 100.0, 1.0, bot.agora_ms(rel))
+
+
+def test_otimizador_frequencia_e_ativacao_somada(tmp_path):
+    import otimizar_frequencia as of
+    import ativar_config
+    import random
+    random.seed(4)
+    ms, dados, uni = of.IV_MS, {}, []
+    for k in range(12):
+        cs, p = [], 100.0
+        for i in range(1500):
+            drift = 0.06 if ((i + 37 * k) // 300) % 2 == 0 else -0.06
+            a, p = p, max(1, p + drift + random.gauss(0, 0.5))
+            cs.append({"t": i * ms, "T": (i + 1) * ms - 1, "o": a, "h": max(a, p) + .2, "l": min(a, p) - .2,
+                       "c": p, "v": 100})
+        dados["C%02d" % k] = cs
+        uni.append(["C%02d" % k, 9e8 / (k + 1)])
+    linhas = []
+    escolhida, m_teste, aprovada = of.otimizar({"universo": uni, "dados": dados}, 0.6, linhas.append)
+    assert escolhida is not None and any("COMPARACAO" in l for l in linhas)
+    # ativacao soma com a configuracao ja ativa (ex.: estrategia) em vez de apagar
+    destino = str(tmp_path / "config_ativa.json")
+    json.dump({"estrategia": "tendencia"}, open(destino, "w"))
+    origem = str(tmp_path / "freq.json")
+    json.dump({"parametros": escolhida, "aprovada": True, "cfg_para_o_bot": {"max_posicoes": 4}}, open(origem, "w"))
+    ok, _ = ativar_config.ativar(origem, destino)
+    assert ok and json.load(open(destino)) == {"estrategia": "tendencia", "max_posicoes": 4}

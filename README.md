@@ -49,6 +49,8 @@ Não envia ordens, não assina nada, não usa carteira, seed, chave privada nem 
 | `21_instalar_no_servidor.bat` | Copia a pasta do bot para um servidor Linux (ex.: Hetzner, Ubuntu 24.04) e instala como serviço 24h que reinicia sozinho. |
 | `22_ver_servidor.bat` | Abre o painel do servidor no navegador (http://localhost:8051, via túnel SSH) e mostra o log ao vivo. |
 | `23_controlar_servidor.bat` | Status, parar, ligar, reiniciar ou fechar todas as posições no servidor. |
+| `24_otimizar_frequencia.bat` | Testa se a estratégia aprovada pode operar mais vezes (10/20/30 moedas, 2/3/4 posições, 3/5 ops/dia) com validação fora da amostra. |
+| `25_ativar_frequencia.bat` | Ativa a configuração de frequência **só se aprovada**. Reinicie o bot depois. |
 | `9_dashboard_celular.bat` | Igual ao 8, mas libera o acesso pelo celular no mesmo Wi-Fi. Clique em CELULAR no painel e leia o QR Code. O link tem uma chave de acesso (arquivo `dashboard_chave.txt`); sem ela, outro aparelho recebe acesso negado. Apague esse arquivo para gerar uma chave nova. |
 
 - Configure o Windows para **não suspender** quando estiver na tomada: Configurações → Sistema → Energia → Suspensão = Nunca.

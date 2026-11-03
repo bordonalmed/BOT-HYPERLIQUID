@@ -3,6 +3,7 @@
 Ativa no bot a configuracao do otimizador de rompimento, SO se ela foi APROVADA
 na validacao fora da amostra. Uso:
   python ativar_config.py            -> ativa melhor_config_rompimento.json (se aprovada)
+  python ativar_config.py frequencia -> ativa melhor_config_frequencia.json (se aprovada)
   python ativar_config.py --desativar -> volta para a estrategia padrao do bot.py (tendencia)
 Reinicie o bot depois (6_parar_bot.bat e 3_iniciar_bot.bat).
 """
@@ -23,8 +24,13 @@ def ativar(origem=ORIGEM, destino=DESTINO):
     if not dados.get("aprovada"):
         return False, ("A configuracao NAO foi aprovada na validacao fora da amostra. "
                        "Nada foi ativado; o bot continua com a estrategia atual.")
+    atual = {}
+    if os.path.exists(destino):            # soma com o que ja estava ativo (ex.: estrategia + frequencia)
+        with open(destino) as f:
+            atual = json.load(f)
+    atual.update(dados["cfg_para_o_bot"])
     with open(destino, "w") as f:
-        json.dump(dados["cfg_para_o_bot"], f, indent=2)
+        json.dump(atual, f, indent=2)
     return True, "Configuracao ATIVADA: %s. Reinicie o bot." % json.dumps(dados["parametros"])
 
 
@@ -36,6 +42,13 @@ def desativar(destino=DESTINO):
 
 
 if __name__ == "__main__":
-    ok, msg = desativar() if "--desativar" in sys.argv else ativar()
+    if "--desativar" in sys.argv:
+        ok, msg = desativar()
+    elif "frequencia" in sys.argv:
+        ok, msg = ativar(os.path.join(BASE, "melhor_config_frequencia.json"))
+        if not ok and "Rode primeiro" in msg:
+            msg = "Rode primeiro o otimizador de frequencia (24_otimizar_frequencia.bat)."
+    else:
+        ok, msg = ativar()
     print(msg)
     sys.exit(0 if ok else 1)

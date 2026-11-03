@@ -27,3 +27,5 @@ trades_*.csv
 KILL_FECHAR
 servidor_ip.txt
 venv/
+otimizacao_frequencia_resultado.txt
+melhor_config_frequencia.json
