@@ -63,6 +63,16 @@ def modo_e_cfg(base):
     return modo, dict(bot.CFG, arquivo_estado="state_%s.json" % modo, arquivo_trades="trades_%s.csv" % modo)
 
 
+EVENTOS = ("SINAL", "IGNORADA", "ABRIU", "FECHOU", "FECHANDO", "LIMITE DIARIO", "APORTE", "CONFERENCIA")
+
+
+def eventos_do_log(caminho, n=10):
+    """Ultimos eventos relevantes (sinais, entradas, saidas) do bot.log."""
+    linhas = _tail(caminho, linhas=2000, max_bytes=400_000)
+    ev = [l for l in linhas if any((" | %s" % e) in l for e in EVENTOS)]
+    return ev[-n:][::-1]
+
+
 def coletar(base, cfg=bot.CFG, agora=None, modo="paper"):
     agora = agora or time.time()
     agora_ms = int(agora * 1000)
@@ -178,6 +188,11 @@ def coletar(base, cfg=bot.CFG, agora=None, modo="paper"):
             "dd": dd, "dd_max": report.MAX_DD_PCT,
         },
         "log": _tail(os.path.join(base, "bot.log")),
+        "eventos": eventos_do_log(os.path.join(base, "bot.log")),
+        "intervalo": cfg["intervalo"],
+        "proximo_candle_ms": (agora_ms // cfg["intervalo_ms"] + 1) * cfg["intervalo_ms"],
+        "nocional_minimo": cfg["nocional_minimo"],
+        "risco_por_trade": cfg["risco_por_trade"],
     }
 
 
@@ -286,6 +301,7 @@ footer{margin-top:18px;color:var(--dim);font-size:11px;text-align:center;letter-
     </div>
   </header>
   <div class="meta" id="meta" style="margin:-8px 0 14px"></div>
+  <div class="panel y" style="margin-bottom:14px"><h2>Atividade do bot</h2><div id="atividade"></div></div>
   <div id="celCard" class="panel m" style="display:none;margin-bottom:14px">
     <h2>Abrir no celular</h2>
     <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center">
@@ -438,6 +454,19 @@ function universo(d){
   return '<div class="coins">'+d.universo.map(([m,v])=>`<div class="coin ${abertas.has(m)?'open':''}">${esc(m)}<span>${(v/1e6).toFixed(0)}M</span></div>`).join('')+'</div>';
 }
 
+function atividade(d){
+  const falta=Math.max(0,d.proximo_candle_ms-d.agora_ms), h=Math.floor(falta/3600000), m=Math.floor(falta%3600000/60000);
+  const hora=new Date(d.proximo_candle_ms).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
+  let h2=`<div class="row"><span>Proxima analise do mercado (candle de ${esc(d.intervalo)})</span><span style="color:var(--cyan)">em ${h}h ${m}min · as ${hora}</span></div>`;
+  const risco=d.equity*d.risco_por_trade;
+  if(risco<d.nocional_minimo*0.05) h2+=`<div class="row"><span>Capital</span><span style="color:var(--yel)">Saldo baixo: a maioria dos sinais sera IGNORADA (posicao abaixo de US$ ${d.nocional_minimo}). Ideal: US$ 50+</span></div>`;
+  h2+='<div class="meta" style="margin:10px 0 6px">Ultimos eventos (sinais, entradas, saidas, ignorados):</div>';
+  if(!d.eventos.length) return h2+'<div class="empty" style="padding:12px 0">NENHUM SINAL AINDA. O BOT ANALISA A CADA CANDLE DE 4H; E NORMAL PASSAR HORAS OU DIAS SEM SINAL.</div>';
+  return h2+'<div class="term" style="height:auto;max-height:220px">'+d.eventos.map(l=>{let c='l-info';
+    if(/IGNORADA/.test(l))c='l-warn';else if(/ABRIU/.test(l))c='l-open';else if(/FECH/.test(l))c='l-close';else if(/SINAL/.test(l))c='l-info';
+    return `<div class="${c}">${esc(l.replace(/ UTC \| INFO \| /,' | '))}</div>`}).join('')+'</div>';
+}
+
 function logs(d){
   const el=$('log'), noFim=el.scrollTop+el.clientHeight>=el.scrollHeight-20;
   el.innerHTML=d.log.length?d.log.map(l=>{let c='l-info';
@@ -467,7 +496,7 @@ function render(d){
     kpi('Drawdown max',pct(d.drawdown),'limite p/ real: 15% · alav. max '+d.alavancagem_max+'x',d.drawdown>=15?'neg':'',d.drawdown/15*100,1);
   $('curva').innerHTML=curva(d); $('crit').innerHTML=criterios(d); $('posicoes').innerHTML=posicoes(d);
   $('dia').innerHTML=dia(d); $('trades').innerHTML=trades(d); $('moedas').innerHTML=moedas(d);
-  $('universo').innerHTML=universo(d); $('radar').innerHTML=radar(d); logs(d);
+  $('universo').innerHTML=universo(d); $('radar').innerHTML=radar(d); $('atividade').innerHTML=atividade(d); logs(d);
 }
 
 let qrFeito=false;
