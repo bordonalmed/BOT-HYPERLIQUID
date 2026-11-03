@@ -957,6 +957,13 @@ class LiveBot(PaperBot):
         if "capital_inicial_conta" not in self.estado:
             self.estado["capital_inicial_conta"] = self.conta_valor
             self.estado["inicio_conta_ms"] = now_ms
+        elif "inicio_conta_ms" not in self.estado:
+            # estado de versao antiga (sem registro de depositos): passa a medir o capital
+            # investido como TODOS os depositos - saques da conta desde o inicio
+            log.info("Atualizando controle de depositos: capital investido = depositos - saques desde a criacao da conta")
+            self.estado["capital_inicial_conta"] = 0.0
+            self.estado["inicio_conta_ms"] = 0
+            self.estado["aportes_ms"] = 0
         if now_ms - self.estado.get("aportes_ms", 0) >= 5 * 60_000:      # depositos/saques: a cada 5 min
             try:
                 aportes = self.ex.aportes_desde(self.estado.get("inicio_conta_ms", now_ms))

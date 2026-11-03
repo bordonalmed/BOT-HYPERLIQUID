@@ -984,3 +984,20 @@ def test_deposito_nao_conta_como_lucro(tmp_path):
     d = dashboard.coletar(str(tmp_path), dict(bot.CFG, arquivo_estado="state_testnet.json",
                                                arquivo_trades="trades_testnet.csv"), agora=rel(), modo="testnet")
     assert d["capital_inicial"] == pytest.approx(74.0) and d["pnl_total"] == pytest.approx(0.0)
+
+
+def test_estado_antigo_passa_a_descontar_depositos_ja_feitos(tmp_path):
+    lb, ex, info, exch, api, rel = novo_livebot(tmp_path)
+    # estado gravado pela versao antiga: capital inicial 19.78, sem inicio_conta_ms
+    lb.estado["capital_inicial_conta"] = 19.78
+    info.estado["marginSummary"]["accountValue"] = "58.79"
+    pedidos = []
+    def ledger(a, t):
+        pedidos.append(t)
+        return [{"delta": {"type": "deposit", "usdc": "19.80"}}, {"delta": {"type": "deposit", "usdc": "39.50"}}]
+    info.user_non_funding_ledger_updates = ledger
+    lb._sincronizar(bot.agora_ms(rel))
+    assert pedidos == [0]                                         # leu desde a criacao da conta
+    investido = lb.estado["capital_inicial_conta"] + lb.estado["aportes"]
+    assert investido == pytest.approx(59.30)
+    assert 58.79 - investido == pytest.approx(-0.51)              # resultado real, nao +39
