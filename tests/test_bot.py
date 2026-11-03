@@ -1001,3 +1001,39 @@ def test_estado_antigo_passa_a_descontar_depositos_ja_feitos(tmp_path):
     investido = lb.estado["capital_inicial_conta"] + lb.estado["aportes"]
     assert investido == pytest.approx(59.30)
     assert 58.79 - investido == pytest.approx(-0.51)              # resultado real, nao +39
+
+
+def test_adota_posicoes_da_corretora_sem_registro_local(tmp_path):
+    lb, ex, info, exch, api, rel = novo_livebot(tmp_path)
+    agora = bot.agora_ms(rel)
+    # duas posicoes reais com stop e alvo na corretora, e o state local foi perdido
+    info.estado["assetPositions"] = [
+        {"position": {"coin": "BTC", "szi": "-0.00026", "entryPx": "76895", "unrealizedPnl": "-0.1"}},
+        {"position": {"coin": "ETH", "szi": "-0.0069", "entryPx": "2238.7", "unrealizedPnl": "-0.3"}}]
+    info.ordens = [{"coin": "BTC", "oid": 1, "orderType": "Stop Market", "triggerPx": "80309"},
+                   {"coin": "BTC", "oid": 2, "orderType": "Take Profit Market", "triggerPx": "66653.1"},
+                   {"coin": "ETH", "oid": 3, "orderType": "Stop Market", "triggerPx": "2366.6"},
+                   {"coin": "ETH", "oid": 4, "orderType": "Take Profit Market", "triggerPx": "1854.9"}]
+    t_entrada = agora - int(3.8 * 86_400_000)
+    info.fills = [{"coin": "BTC", "px": "76895", "sz": "0.00026", "dir": "Open Short", "closedPnl": "0",
+                   "fee": "0.009", "time": t_entrada}]
+    lb._sincronizar(agora)
+    pos = {p["moeda"]: p for p in lb.estado["posicoes"]}
+    assert set(pos) == {"BTC", "ETH"}
+    assert pos["BTC"]["lado"] == "short" and pos["BTC"]["stop"] == 80309 and pos["BTC"]["alvo"] == 66653.1
+    assert pos["BTC"]["entrada_ms"] == t_entrada                          # tempo real preservado (8 dias)
+    assert len(info.ordens) == 4                                          # nada recolocado em duplicidade
+    # nunca abre outra posicao numa moeda que ja tem posicao na corretora
+    assert not lb._pode_abrir()                                           # 2 de 2 posicoes ocupadas
+    lb.estado["posicoes"] = [p for p in lb.estado["posicoes"] if p["moeda"] != "ETH"]
+    assert not lb.abrir("ETH", "long", 2200.0, 30.0, agora)
+
+
+def test_posicao_sem_protecao_bloqueia_moeda(tmp_path, caplog):
+    lb, ex, info, exch, api, rel = novo_livebot(tmp_path)
+    info.estado["assetPositions"] = [{"position": {"coin": "BTC", "szi": "0.0002", "entryPx": "100"}}]
+    info.ordens = []
+    lb._sincronizar(bot.agora_ms(rel))
+    assert lb.estado["posicoes"] == [] and "BTC" in lb.bloqueadas
+    assert "DESCONHECIDA" in caplog.text
+    assert not lb.abrir("BTC", "short", 100.0, 1.0, bot.agora_ms(rel))

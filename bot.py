@@ -938,6 +938,8 @@ class LiveBot(PaperBot):
         self.conta_valor = None
         self.livre = 0.0
         self.avisadas = set()
+        self.pos_corretora = {}      # posicoes que existem na corretora (geridas ou nao)
+        self.bloqueadas = set()      # moedas com posicao na corretora que o bot nao conseguiu adotar
         super().__init__(cfg, api, base_dir, now_fn)
         self.path_kill_fechar = os.path.join(base_dir, cfg["arquivo_kill_fechar"])
 
@@ -981,11 +983,19 @@ class LiveBot(PaperBot):
             else:
                 pos["tamanho"] = abs(pos_ex[pos["moeda"]]["szi"])
                 pos["pnl_corretora"] = pos_ex[pos["moeda"]].get("pnl")
+        self.pos_corretora = pos_ex
         geridas = {p["moeda"] for p in self.estado["posicoes"]}
-        for m in pos_ex:
-            if m not in geridas and m not in self.avisadas:
-                log.warning("POSICAO DESCONHECIDA em %s na corretora (nao foi aberta por este bot): nao sera gerida", m)
-                self.avisadas.add(m)
+        orfas = [m for m in pos_ex if m not in geridas]
+        self.bloqueadas = set()
+        if orfas:
+            todas = self.ex.ordens_abertas()
+            for m in orfas:
+                if not self._adotar(m, pos_ex[m], todas, now_ms):
+                    self.bloqueadas.add(m)
+                    if m not in self.avisadas:
+                        log.warning("POSICAO DESCONHECIDA em %s na corretora (sem stop e alvo reconheciveis): "
+                                    "nao sera gerida e o bot NAO abre nada nessa moeda enquanto ela existir", m)
+                        self.avisadas.add(m)
         pendentes = [p for p in self.estado["posicoes"]
                      if not p.get("motivo_saida") and p["moeda"] in pos_ex]
         if pendentes:
@@ -1000,6 +1010,42 @@ class LiveBot(PaperBot):
                     except Exception as e:
                         log.error("Nao consegui recolocar protecao em %s: %s. Fechando por seguranca.", pos["moeda"], e)
                         self.fechar(pos, None, "sem_protecao", now_ms)
+
+    def _adotar(self, moeda, p_ex, ordens, now_ms):
+        """Posicao na corretora sem registro local (ex.: state apagado ou pasta trocada).
+        Se ela tiver stop e alvo na corretora, o bot reconstrui e volta a gerir."""
+        lado = "long" if p_ex["szi"] > 0 else "short"
+        stops = [o for o in ordens if o.get("coin") == moeda and "stop" in str(o.get("orderType", "")).lower()]
+        alvos = [o for o in ordens if o.get("coin") == moeda and "take profit" in str(o.get("orderType", "")).lower()]
+        if not stops or not alvos:
+            return False
+        entrada = p_ex["entryPx"]
+        stop, alvo = float(stops[0]["triggerPx"]), float(alvos[0]["triggerPx"])
+        entrada_ms = now_ms
+        try:   # horario real da entrada, para a saida por tempo continuar certa
+            opens = [f for f in self.ex.fills_desde(moeda, now_ms - 30 * 86_400_000)
+                     if str(f.get("dir", "")).startswith("Open")]
+            if opens:
+                entrada_ms = max(int(f["time"]) for f in opens)
+        except Exception:
+            pass
+        pos = {"moeda": moeda, "lado": lado, "entrada": entrada, "tamanho": abs(p_ex["szi"]),
+               "stop": stop, "alvo": alvo, "entrada_ms": entrada_ms,
+               "atr": abs(entrada - stop) / self.cfg["stop_atr_mult"], "trailing": None,
+               "extremo": entrada, "slip": 0.0, "ultimo_mid": self.mids.get(moeda, entrada),
+               "conferido_ms": now_ms, "oid_stop": int(stops[0]["oid"]), "oid_alvo": int(alvos[0]["oid"]),
+               "pnl_corretora": p_ex.get("pnl"), "adotada": True}
+        self.estado["posicoes"].append(pos)
+        log.warning("ADOTADA posicao %s %s da corretora (sem registro local) | entrada %.6g | stop %.6g | alvo %.6g | "
+                    "aberta em %s UTC. Voltou a ser gerida pelo bot.", lado.upper(), moeda, entrada, stop, alvo,
+                    iso_utc(entrada_ms))
+        return True
+
+    def _pode_abrir(self):
+        e = self.estado
+        ocupadas = len(e["posicoes"]) + len(self.bloqueadas)
+        return (not e["pausado"] and ocupadas < self.cfg["max_posicoes"]
+                and e["trades_hoje"] < self.cfg["max_trades_dia"])
 
     def _proteger(self, pos, tipos=("sl", "tp")):
         for tipo in tipos:
@@ -1054,6 +1100,9 @@ class LiveBot(PaperBot):
         cfg = self.cfg
         if moeda not in self.ex._meta:
             log.info("IGNORADA %s: moeda nao existe na %s", moeda, self.modo)
+            return False
+        if moeda in self.pos_corretora or any(p["moeda"] == moeda for p in self.estado["posicoes"]):
+            log.info("IGNORADA %s %s: ja existe posicao nessa moeda na corretora", moeda, lado.upper())
             return False
         capital = self._capital_operacional()
         dist = cfg["stop_atr_mult"] * atr_val
@@ -1199,6 +1248,9 @@ def main():
     try:
         modo = execucao.modo_do_env(env)
         if modo == "paper":
+            if not os.path.exists(os.path.join(base, ".env")):
+                log.warning("ATENCAO: arquivo .env NAO encontrado nesta pasta. O bot vai rodar em SIMULACAO "
+                            "(paper). Se voce opera na conta real, copie o .env (e o state_real.json) para esta pasta.")
             bot = PaperBot(CFG, base_dir=base)
         else:
             log.warning("MODO %s: o bot vai ENVIAR ORDENS para a Hyperliquid %s.", modo.upper(),

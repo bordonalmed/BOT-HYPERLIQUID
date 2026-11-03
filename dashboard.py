@@ -189,6 +189,7 @@ def coletar(base, cfg=bot.CFG, agora=None, modo="paper"):
         },
         "log": _tail(os.path.join(base, "bot.log")),
         "eventos": eventos_do_log(os.path.join(base, "bot.log")),
+        "sem_env": not os.path.exists(os.path.join(base, ".env")),
         "intervalo": cfg["intervalo"],
         "proximo_candle_ms": (agora_ms // cfg["intervalo_ms"] + 1) * cfg["intervalo_ms"],
         "nocional_minimo": cfg["nocional_minimo"],
@@ -457,7 +458,8 @@ function universo(d){
 function atividade(d){
   const falta=Math.max(0,d.proximo_candle_ms-d.agora_ms), h=Math.floor(falta/3600000), m=Math.floor(falta%3600000/60000);
   const hora=new Date(d.proximo_candle_ms).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
-  let h2=`<div class="row"><span>Proxima analise do mercado (candle de ${esc(d.intervalo)})</span><span style="color:var(--cyan)">em ${h}h ${m}min · as ${hora}</span></div>`;
+  let h2=d.sem_env&&d.modo==='paper'?'<div class="row"><span style="color:var(--red)">SEM ARQUIVO .env NESTA PASTA</span><span style="color:var(--red)">O bot esta em SIMULACAO. Se voce opera na conta real, ele NAO esta rodando aqui.</span></div>':'';
+  h2+=`<div class="row"><span>Proxima analise do mercado (candle de ${esc(d.intervalo)})</span><span style="color:var(--cyan)">em ${h}h ${m}min · as ${hora}</span></div>`;
   const risco=d.equity*d.risco_por_trade;
   if(risco<d.nocional_minimo*0.05) h2+=`<div class="row"><span>Capital</span><span style="color:var(--yel)">Saldo baixo: a maioria dos sinais sera IGNORADA (posicao abaixo de US$ ${d.nocional_minimo}). Ideal: US$ 50+</span></div>`;
   h2+='<div class="meta" style="margin:10px 0 6px">Ultimos eventos (sinais, entradas, saidas, ignorados):</div>';
