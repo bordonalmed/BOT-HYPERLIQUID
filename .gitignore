@@ -25,3 +25,5 @@ config_ativa.json
 state_*.json
 trades_*.csv
 KILL_FECHAR
+servidor_ip.txt
+venv/

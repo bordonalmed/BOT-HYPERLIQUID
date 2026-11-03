@@ -46,6 +46,9 @@ Não envia ordens, não assina nada, não usa carteira, seed, chave privada nem 
 | `18_ordem_teste_testnet.bat` | Abre ~US$ 12 em BTC na **testnet**, coloca stop e alvo na corretora, confere, cancela e fecha. |
 | `19_testar_conta_real.bat` | Confere chave, saldo e posições na **conta real**, sem operar (exige `MODO=real` + `CONFIRMO_DINHEIRO_REAL=SIM`). |
 | `20_ordem_teste_real.bat` | Ordem de teste supervisionada de ~US$ 12 em BTC na **conta real**: abre, coloca stop/alvo, confere e fecha. |
+| `21_instalar_no_servidor.bat` | Copia a pasta do bot para um servidor Linux (ex.: Hetzner, Ubuntu 24.04) e instala como serviço 24h que reinicia sozinho. |
+| `22_ver_servidor.bat` | Abre o painel do servidor no navegador (http://localhost:8051, via túnel SSH) e mostra o log ao vivo. |
+| `23_controlar_servidor.bat` | Status, parar, ligar, reiniciar ou fechar todas as posições no servidor. |
 | `9_dashboard_celular.bat` | Igual ao 8, mas libera o acesso pelo celular no mesmo Wi-Fi. Clique em CELULAR no painel e leia o QR Code. O link tem uma chave de acesso (arquivo `dashboard_chave.txt`); sem ela, outro aparelho recebe acesso negado. Apague esse arquivo para gerar uma chave nova. |
 
 - Configure o Windows para **não suspender** quando estiver na tomada: Configurações → Sistema → Energia → Suspensão = Nunca.
@@ -146,6 +149,13 @@ Como funciona ao vivo:
 - `KILL` para o bot e **mantém** as posições com stop/alvo na corretora. `KILL_FECHAR` fecha tudo a mercado e para.
 - **REAL** exige `MODO=real` **e** `CONFIRMO_DINHEIRO_REAL=SIM` no `.env`. O bot dimensiona como se a conta tivesse no máximo `capital_max_real` (US$ 60).
 - **Segurança:** use só a API Wallet (opera, não saca). Nunca coloque a chave da carteira principal; o bot recusa. Nunca envie o `.env` para ninguém.
+
+## Servidor 24 horas (Linux)
+1. Crie um servidor Ubuntu 24.04 (ex.: Hetzner CX22). Faça o primeiro acesso uma vez (`ssh root@IP`) para trocar a senha, se for pedido.
+2. **Pare o bot do notebook** (`6_parar_bot.bat`). O bot nunca deve rodar em dois lugares com a mesma conta.
+3. Rode `21_instalar_no_servidor.bat` e informe o IP. Ele copia a pasta (inclusive `.env`, estado e histórico) e roda `servidor/instalar.sh`.
+4. No servidor, o bot vira o serviço `bot-hyperliquid` (reinicia se travar ou se o servidor reiniciar) e o painel vira `dashboard-hyperliquid`, acessível só por túnel SSH (`22_ver_servidor.bat`).
+5. Atalhos no servidor: `bash servidor/comandos.sh status|log|parar|iniciar|reiniciar|fechar_tudo`.
 
 ## trades.csv – colunas
 `horario_utc` (saída), `moeda`, `lado`, `entrada`, `saida` (preços já com slippage), `tamanho` (em moedas),
